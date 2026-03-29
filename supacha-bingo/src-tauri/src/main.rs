@@ -4,16 +4,9 @@ use std::path::Path;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BingoConfig {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub hit_scale: f64,
-    pub se_enabled: bool,
-    pub se_volume: f64,
-    pub tts_enabled: bool,
-    pub tts_volume: f64,
-    pub tts_repeat_count: i32,
+    pub x: f64, pub y: f64, pub w: f64, pub h: f64, pub hit_scale: f64,
+    pub se_enabled: bool, pub se_volume: f64,
+    pub tts_enabled: bool, pub tts_volume: f64, pub tts_repeat_count: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -47,12 +40,11 @@ fn load_settings() -> Result<BingoConfig, String> {
 
 #[tauri::command]
 fn save_session(filename: Option<String>, hits: Vec<i32>) -> Result<String, String> {
-    // ディレクトリを再帰的に作成（エラーを未然に防ぐ）
+    // フォルダがない場合は再帰的に作成。エラーならパニックせずResultで返す
     if !Path::new(SESSIONS_DIR).exists() {
-        fs::create_dir_all(SESSIONS_DIR).map_err(|e| e.to_string())?;
+        fs::create_dir_all(SESSIONS_DIR).map_err(|e| format!("Directory creation failed: {}", e))?;
     }
 
-    // ファイル名が未指定、または空文字の場合は新規発行
     let file_name = match filename {
         Some(f) if !f.is_empty() => f,
         _ => {
@@ -65,7 +57,7 @@ fn save_session(filename: Option<String>, hits: Vec<i32>) -> Result<String, Stri
     let session = BingoSession { timestamp: file_name.clone(), hits };
     let json = serde_json::to_string_pretty(&session).map_err(|e| e.to_string())?;
     
-    fs::write(path, json).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| format!("File write failed: {}", e))?;
     Ok(file_name)
 }
 
@@ -73,11 +65,9 @@ fn save_session(filename: Option<String>, hits: Vec<i32>) -> Result<String, Stri
 fn get_sessions() -> Result<Vec<String>, String> {
     if !Path::new(SESSIONS_DIR).exists() { return Ok(vec![]); }
     let paths = fs::read_dir(SESSIONS_DIR).map_err(|e| e.to_string())?;
-    let mut files: Vec<String> = paths
-        .filter_map(|p| p.ok())
+    let mut files: Vec<String> = paths.filter_map(|p| p.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|f| f.ends_with(".json"))
-        .collect();
+        .filter(|f| f.ends_with(".json")).collect();
     files.sort_by(|a, b| b.cmp(a));
     Ok(files)
 }
@@ -92,9 +82,7 @@ fn load_session(filename: String) -> Result<Vec<i32>, String> {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            save_settings, load_settings, save_session, get_sessions, load_session
-        ])
+        .invoke_handler(tauri::generate_handler![save_settings, load_settings, save_session, get_sessions, load_session])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
