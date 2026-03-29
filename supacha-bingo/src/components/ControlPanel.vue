@@ -28,6 +28,11 @@ onMounted(async () => {
     } catch (e) { console.error(e); }
 });
 
+// 【追加】編集状態の変化を監視して、表示画面へ通知する
+watch(isEditing, (newVal) => {
+    emit('edit-mode-update', newVal);
+});
+
 // 編集開始
 const startEdit = () => {
     tempGrid.value = { ...grid.value };

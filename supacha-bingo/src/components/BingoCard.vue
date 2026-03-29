@@ -126,12 +126,20 @@ const stopRouletteAnimation = (finalNumber: number) => {
     }
 };
 
+// 【追加】枠線を表示するかどうかの状態
+const showBorder = ref(false);
+
 // --- タウリイベント受診 (IPC LISTENERS) ---
 onMounted(async () => {
     console.log("Display window: Initialized with Fixed Roulette Display.");
 
     // 操作パネルからの位置・縮尺更新
     await listen<any>('grid-update', (event) => { gridPos.value = event.payload; });
+
+    // 【追加】編集モードの状態更新をリッスン
+    await listen<boolean>('edit-mode-update', (event) => {
+        showBorder.value = event.payload;
+    });
 
     // ビンゴ当選イベント
     await listen<{ number: number }>('bingo-hit', (event) => {
@@ -176,7 +184,7 @@ onMounted(async () => {
             width: gridPos.w + 'px', height: gridPos.h + 'px',
             pointerEvents: 'none'
         }">
-            <div v-for="n in 25" :key="n" class="cell">
+            <div v-for="n in 25" :key="n" class="cell" :class="{ 'show-border': showBorder }">
                 <span class="cell-num">{{ n }}</span>
                 <transition name="pop">
                     <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="hit-mark-img" :style="{
@@ -273,6 +281,16 @@ onMounted(async () => {
     display: grid;
     place-items: center;
     overflow: hidden;
+    /* デフォルトでは枠線を透明にしておくことで、ガタつきを防ぐ */
+    border: 1px solid transparent;
+    box-sizing: border-box;
+    /* 枠線が表示されてもサイズが変わらないように設定 */
+}
+
+/* 【追加】編集モード中の枠線スタイル */
+.cell.show-border {
+    border: 1px solid rgba(255, 0, 0, 0.8);
+    /* 半透明の赤で表示 */
 }
 
 .cell-num {
@@ -282,6 +300,16 @@ onMounted(async () => {
     left: 2px;
     color: #fff;
     opacity: 0.3;
+    /* 通常時は消しておく */
+    opacity: 0;
+    /* 滑らかに表示 */
+    transition: opacity 0.2s;
+}
+
+/* 修正ポイント3: 編集中の数字を表示 */
+.cell.show-border .cell-num {
+    color: rgba(255, 0, 0, 0.8);
+    opacity: 0.5;
 }
 
 .hit-mark-img {
