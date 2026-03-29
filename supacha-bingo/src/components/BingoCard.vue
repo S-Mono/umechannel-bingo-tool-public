@@ -37,8 +37,9 @@ onMounted(async () => {
                 <span class="cell-num">{{ n }}</span>
                 <transition name="pop">
                     <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="hit-mark-img" :style="{
-                        width: gridPos.hit_scale + '%',
-                        height: gridPos.hit_scale + '%'
+                        /* 100%の時に元の130%のサイズになるように係数を設定 */
+                        width: (gridPos.hit_scale * 1.4) + '%',
+                        height: (gridPos.hit_scale * 1.4) + '%',
                     }" />
                 </transition>
             </div>
@@ -79,10 +80,11 @@ onMounted(async () => {
 }
 
 .cell {
+    /* 修正：Gridレイアウトを採用し、子要素（スタンプ）を中央に強制配置 */
+    display: grid;
+    place-items: center;
     position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    overflow: hidden;
 }
 
 .cell-num {
@@ -96,13 +98,17 @@ onMounted(async () => {
 
 /* hit-mark-img の固定の width/height を削除、または基準値にする */
 .hit-mark-img {
-    position: absolute;
-    /* 固定の width, height を削除、または基準値にする */
+    /* 重要：position: absolute を削除しました。
+           これにより、座標の競合がなくなり、中央からズレなくなります。
+        */
     object-fit: contain;
     z-index: 10;
     pointer-events: none;
+    /* アニメーションの基準点を中央に固定 */
+    transform-origin: center center;
 }
 
+/* 修正：アニメーションの各ステップに中央寄せ (translate) を含める */
 .pop-enter-active {
     animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
