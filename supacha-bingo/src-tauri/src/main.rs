@@ -46,9 +46,9 @@ fn load_settings() -> Result<BingoConfig, String> {
             h: 239.0,
             hit_scale: 100.0,
             se_enabled: true,
-            se_volume: 50.0,
+            se_volume: 20.0,
             tts_enabled: true,
-            tts_volume: 80.0,
+            tts_volume: 40.0,
             tts_repeat_count: 1, })
     }
 }

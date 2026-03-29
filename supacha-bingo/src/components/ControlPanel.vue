@@ -6,8 +6,8 @@ import { emit } from '@tauri-apps/api/event';
 // 確定済みの位置情報（表示画面と同期している値）
 const grid = ref({
     x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
-    se_enabled: true, se_volume: 50,
-    tts_enabled: true, tts_volume: 80, tts_repeat_count: 1
+    se_enabled: true, se_volume: 20,
+    tts_enabled: true, tts_volume: 40, tts_repeat_count: 1
 });
 // 編集中のアコーディオン（トグル）の開閉状態
 const isToggleOpen = ref(false);
@@ -18,9 +18,9 @@ const hitHistory = ref<number[]>([]);
 onMounted(async () => {
     try {
         const saved = await invoke<any>('load_settings');
-        // 【重要】既存のデフォルト値に、保存された値を上書きマージする
-        // これにより、保存ファイルに項目が足りなくても undefined になりません
+        // 保存された値で上書きマージ
         grid.value = { ...grid.value, ...saved };
+        // 【修正】マージ後の完全なオブジェクトを tempGrid に渡す
         tempGrid.value = { ...grid.value };
         emit('grid-update', grid.value);
     } catch (e) {
@@ -116,6 +116,7 @@ const resetBingo = () => {
                         <label><input type="checkbox" v-model="tempGrid.se_enabled"> 有効</label>
                         <input type="range" min="0" max="100" v-model.number="tempGrid.se_volume"
                             :disabled="!tempGrid.se_enabled">
+                        <span class="value-display">音量: {{ tempGrid.se_volume }}%</span>
                     </div>
 
                     <div class="setting-group">
@@ -123,6 +124,7 @@ const resetBingo = () => {
                         <label><input type="checkbox" v-model="tempGrid.tts_enabled"> 有効</label>
                         <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume"
                             :disabled="!tempGrid.tts_enabled">
+                        <span class="value-display">音量: {{ tempGrid.tts_volume }}%</span>
                         <div class="repeat-select" v-if="tempGrid.tts_enabled">
                             <span>読み上げ回数: </span>
                             <select v-model.number="tempGrid.tts_repeat_count">
@@ -136,26 +138,26 @@ const resetBingo = () => {
 
                 <button v-if="!isEditing" class="edit-btn" @click="startEdit">グリッド位置を調整する</button>
 
-                <div class="sliders" :class="{ 'is-locked': !isEditing }">
-                    <label>X: {{ tempGrid.x }}px <input type="range" min="0" max="282" v-model.number="tempGrid.x"
-                            :disabled="!isEditing" /></label>
-                    <label>Y: {{ tempGrid.y }}px <input type="range" min="0" max="368" v-model.number="tempGrid.y"
-                            :disabled="!isEditing" /></label>
-                    <label>W: {{ tempGrid.w }}px <input type="range" min="0" max="282" v-model.number="tempGrid.w"
-                            :disabled="!isEditing" /></label>
-                    <label>H: {{ tempGrid.h }}px <input type="range" min="0" max="368" v-model.number="tempGrid.h"
-                            :disabled="!isEditing" /></label>
+                <div v-if="isEditing" class="editing-controls">
+                    <div class="edit-actions">
+                        <button class="confirm-btn" @click="confirmEdit">設定を保存して終了</button>
+                        <button class="cancel-btn" @click="cancelEdit">キャンセル</button>
+                    </div>
+                    <div class="sliders">
+                        <label>X: <input type="range" min="0" max="282" v-model.number="tempGrid.x" /><span
+                                class="val">{{ tempGrid.x }}px</span></label>
+                        <label>Y: <input type="range" min="0" max="368" v-model.number="tempGrid.y" /><span
+                                class="val">{{ tempGrid.y }}px</span></label>
+                        <label>W: <input type="range" min="0" max="282" v-model.number="tempGrid.w" /><span
+                                class="val">{{ tempGrid.w }}px</span></label>
+                        <label>H: <input type="range" min="0" max="368" v-model.number="tempGrid.h" /><span
+                                class="val">{{ tempGrid.h }}px</span></label>
 
-                    <label style="color: #f1c40f; font-weight: bold;">
-                        🎯 スタンプ縮尺: {{ tempGrid.hit_scale }}%
-                        <input type="range" min="10" max="200" v-model.number="tempGrid.hit_scale"
-                            :disabled="!isEditing" />
-                    </label>
-                </div>
-
-                <div v-if="isEditing" class="edit-actions">
-                    <button class="confirm-btn" @click="confirmEdit">確定 (保存・反映)</button>
-                    <button class="cancel-btn" @click="cancelEdit">キャンセル</button>
+                        <label class="hit-scale-label">
+                            🎯 スタンプ縮尺: <input type="range" min="10" max="200" v-model.number="tempGrid.hit_scale" />
+                            <span class="val">{{ tempGrid.hit_scale }}%</span>
+                        </label>
+                    </div>
                 </div>
             </div>
         </section>

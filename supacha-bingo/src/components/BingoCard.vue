@@ -15,8 +15,8 @@ const SE_WIN_PATH = '/assets/audio/win_confirm.mp3';
 // グリッド配置情報
 const gridPos = ref({
     x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
-    se_enabled: true, se_volume: 50,
-    tts_enabled: true, tts_volume: 80, tts_repeat_count: 1
+    se_enabled: true, se_volume: 20,
+    tts_enabled: true, tts_volume: 40, tts_repeat_count: 1
 });
 // 当選マスリスト
 const hitNumbers = ref<number[]>([]);
@@ -30,9 +30,6 @@ let spinAudio: HTMLAudioElement | null = null; // ループ音のオーディオ
 const confettiCanvas = ref<HTMLCanvasElement | null>(null);
 let myConfetti: confetti.CreateTypes | null = null; // インスタンスを保持
 
-// --- 音響効果 & 音声合成 ---
-const synth = window.speechSynthesis;
-
 // 読み上げ関数の修正（回数指定に対応）
 const speakNumber = (num: number) => {
     if (!gridPos.value.tts_enabled) return;
@@ -41,15 +38,21 @@ const speakNumber = (num: number) => {
     for (let i = 0; i < gridPos.value.tts_repeat_count; i++) {
         const utterance = new SpeechSynthesisUtterance(num.toString());
         utterance.lang = 'ja-JP';
-        utterance.volume = gridPos.value.tts_volume / 100;
+        // 0-100の値を0.0-1.0に変換
+        const gainFactor = 1.5;
+        utterance.volume = Math.min(1.0, (gridPos.value.tts_volume / 100) * gainFactor);
         window.speechSynthesis.speak(utterance);
     }
 };
 
 const playWinSound = () => {
-    // 配信キャプチャ用に音量を調整
+    // 【修正】有効チェック
+    if (!gridPos.value.se_enabled) return;
+
     const audio = new Audio(SE_WIN_PATH);
-    audio.volume = 0.7; // 少し音量を下げる
+    const gainFactor = 0.8;
+    // 【修正】設定された音量を反映 (0-100 -> 0.0-1.0)
+    audio.volume = Math.min(1.0, (gridPos.value.se_volume / 100) * gainFactor);
     audio.play().catch(e => console.error("Audio play failed:", e));
 };
 
@@ -92,9 +95,14 @@ const startRouletteAnimation = (finalNumber: number) => {
     if (!spinAudio) {
         spinAudio = new Audio(SE_SPIN_PATH);
         spinAudio.loop = true;
-        spinAudio.volume = 0.5; // 音量を調整
     }
-    spinAudio.play().catch(e => console.error("Spin Audio failed:", e));
+
+    // 【修正】再生前に設定を適用
+    if (gridPos.value.se_enabled) {
+        const gainFactor = 0.5;
+        spinAudio.volume = Math.min(1.0, (gridPos.value.se_volume / 100) * gainFactor);
+        spinAudio.play().catch(e => console.error("Spin Audio failed:", e));
+    }
 
     // 高速で数字を切り替える (slot machine効果)
     rouletteIntervalId = setInterval(() => {
@@ -141,16 +149,13 @@ onMounted(async () => {
     console.log("Display window: Initialized with Fixed Roulette Display.");
 
     // 操作パネルからの位置・縮尺更新
-    await listen<any>('grid-update', (event) => { gridPos.value = event.payload; });
+    await listen<any>('grid-update', (event) => {
+        gridPos.value = event.payload;
+    });
 
     // 【追加】編集モードの状態更新をリッスン
     await listen<boolean>('edit-mode-update', (event) => {
         showBorder.value = event.payload;
-    });
-
-    // 座標・詳細設定の受信
-    await listen<any>('grid-update', (event) => {
-        gridPos.value = event.payload;
     });
 
     // ビンゴ当選イベント
@@ -185,8 +190,8 @@ onMounted(async () => {
             boxShadow: '0 4px 6px rgba(0,0,0,0.3)' /* 影をつけて浮き立たせる */
         }">
             <transition name="lottery-fade">
-                <span v-if="rouletteNumber !== null" class="roulette-number" :class="{ 'is-confirming': isSpinning }">
-                    {{ rouletteNumber }}
+                <span class="roulette-number" :class="{ 'is-confirming': isSpinning }">
+                    {{ rouletteNumber == null ? '？' : rouletteNumber }}
                 </span>
             </transition>
         </div>
@@ -200,8 +205,8 @@ onMounted(async () => {
                 <span class="cell-num">{{ n }}</span>
                 <transition name="pop">
                     <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="hit-mark-img" :style="{
-                        width: (gridPos.hit_scale * 1.5) + '%',
-                        height: (gridPos.hit_scale * 1.5) + '%',
+                        width: (gridPos.hit_scale * 1.4) + '%',
+                        height: (gridPos.hit_scale * 1) + '%',
                     }" />
                 </transition>
             </div>
@@ -306,12 +311,11 @@ onMounted(async () => {
 }
 
 .cell-num {
-    font-size: 8px;
+    font-size: 10px;
     position: absolute;
-    top: 2px;
+    top: 0px;
     left: 2px;
     color: #fff;
-    opacity: 0.3;
     /* 通常時は消しておく */
     opacity: 0;
     /* 滑らかに表示 */
@@ -321,7 +325,7 @@ onMounted(async () => {
 /* 修正ポイント3: 編集中の数字を表示 */
 .cell.show-border .cell-num {
     color: rgba(255, 0, 0, 0.8);
-    opacity: 0.5;
+    opacity: 1;
 }
 
 .hit-mark-img {
