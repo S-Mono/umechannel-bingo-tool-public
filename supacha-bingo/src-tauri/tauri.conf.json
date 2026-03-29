@@ -11,7 +11,7 @@
   "app": {
     "macOSPrivateApi": true,
     "windows": [
-      { "label": "main", "title": "Bingo Control", "width": 600, "height": 850 },
+      { "label": "main", "title": "Bingo Control", "width": 450, "height": 650 },
       {
         "label": "display",
         "title": "Bingo Display",

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 
 // 確定済みの位置情報（表示画面と同期している値）
 const grid = ref({
@@ -11,9 +11,10 @@ const grid = ref({
 });
 // 編集中のアコーディオン（トグル）の開閉状態
 const isToggleOpen = ref(false);
-
 // 当選履歴
 const hitHistory = ref<number[]>([]);
+// 【追加】アニメーション中フラグ
+const isAnimating = ref(false);
 
 onMounted(async () => {
     try {
@@ -23,6 +24,12 @@ onMounted(async () => {
         // 【修正】マージ後の完全なオブジェクトを tempGrid に渡す
         tempGrid.value = { ...grid.value };
         emit('grid-update', grid.value);
+
+        // 【追加】アニメーション完了通知を受信して履歴を更新
+        await listen<{ number: number }>('bingo-animation-finished', (event) => {
+            hitHistory.value.push(event.payload.number);
+            isAnimating.value = false; // ガード解除
+        });
     } catch (e) {
         console.error("設定の読み込みに失敗しました。デフォルト値を使用します:", e);
         console.error(e);
@@ -70,11 +77,16 @@ const cancelEdit = () => {
 };
 
 const spin = () => {
-    const available = Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
+    // アニメーション中の連続クリックをガード
+    if (isAnimating.value) return;
+
+    const available = Array.from({ length: 25 }, (_, i) => i + 1)
+        .filter(n => !hitHistory.value.includes(n));
     if (available.length === 0) return alert("全て当選済みです");
 
     const num = available[Math.floor(Math.random() * available.length)];
-    hitHistory.value.push(num);
+    isAnimating.value = true; // ガード開始
+
     emit('bingo-hit', { number: num });
 };
 
@@ -92,7 +104,9 @@ const resetBingo = () => {
         <h3>🎡 Bingo Operation</h3>
 
         <section class="spin-section">
-            <button class="spin-btn" @click="spin">SPIN BINGO</button>
+            <button class="spin-btn" :class="{ 'is-animating': isAnimating }" :disabled="isAnimating" @click="spin">
+                {{ isAnimating ? '抽選中...' : 'SPIN BINGO' }}
+            </button>
             <button class="reset-btn" @click="resetBingo">RESET</button>
         </section>
 
@@ -197,6 +211,7 @@ const resetBingo = () => {
 
 .spin-btn {
     width: 100%;
+    height: 60px;
     padding: 15px;
     font-size: 1.2rem;
     background: #e74c3c;

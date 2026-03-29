@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { listen } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import confetti from 'canvas-confetti';
 
 // アセットパス定義
@@ -139,6 +139,19 @@ const stopRouletteAnimation = (finalNumber: number) => {
     if (!hitNumbers.value.includes(finalNumber)) {
         hitNumbers.value.push(finalNumber);
     }
+
+    isSpinning.value = false;
+    rouletteNumber.value = finalNumber;
+    playWinSound();
+    speakNumber(finalNumber);
+    fireConfetti();
+
+    if (!hitNumbers.value.includes(finalNumber)) {
+        hitNumbers.value.push(finalNumber);
+    }
+
+    // 【追加】アニメーション完了を操作パネル側へ通知
+    emit('bingo-animation-finished', { number: finalNumber });
 };
 
 // 【追加】枠線を表示するかどうかの状態
