@@ -1,6 +1,12 @@
 {
   "x": 22.0,
-  "y": 121.0,
+  "y": 109.0,
   "w": 237.0,
-  "h": 239.0
+  "h": 239.0,
+  "hit_scale": 100.0,
+  "se_enabled": true,
+  "se_volume": 50.0,
+  "tts_enabled": true,
+  "tts_volume": 80.0,
+  "tts_repeat_count": 1
 }

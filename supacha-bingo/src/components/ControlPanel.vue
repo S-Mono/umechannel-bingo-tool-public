@@ -4,16 +4,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 
 // 確定済みの位置情報（表示画面と同期している値）
-const grid = ref({ x: 22, y: 103, w: 237, h: 239, hit_scale: 100 }); // hit_scale追加
-
+const grid = ref({
+    x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
+    se_enabled: true, se_volume: 50,
+    tts_enabled: true, tts_volume: 80, tts_repeat_count: 1
+});
 // 編集中のアコーディオン（トグル）の開閉状態
 const isToggleOpen = ref(false);
-
-// 編集モード（変更ボタン押下後）の状態
-const isEditing = ref(false);
-
-// 編集中の値を一時的に保持する変数
-const tempGrid = ref({ ...grid.value });
 
 // 当選履歴
 const hitHistory = ref<number[]>([]);
@@ -21,13 +18,22 @@ const hitHistory = ref<number[]>([]);
 onMounted(async () => {
     try {
         const saved = await invoke<any>('load_settings');
-        grid.value = saved;
+        // 【重要】既存の初期値に、保存された値をマージする（新項目が消えないように）
+        grid.value = { ...grid.value, ...saved };
         tempGrid.value = { ...saved };
         // 起動時に現在の値を表示側に同期
         emit('grid-update', grid.value);
     } catch (e) { console.error(e); }
 });
 
+// 編集中の値を一時的に保持する変数
+const tempGrid = ref({ ...grid.value });
+watch(tempGrid, (newVal) => {
+    emit('grid-update', { ...newVal });
+}, { deep: true });
+
+// 編集モード（変更ボタン押下後）の状態
+const isEditing = ref(false);
 // 【追加】編集状態の変化を監視して、表示画面へ通知する
 watch(isEditing, (newVal) => {
     emit('edit-mode-update', newVal);
@@ -37,23 +43,27 @@ watch(isEditing, (newVal) => {
 const startEdit = () => {
     tempGrid.value = { ...grid.value };
     isEditing.value = true;
+    emit('edit-mode-update', true);
 };
-
 // 確定（反映・保存）
 const confirmEdit = async () => {
     grid.value = { ...tempGrid.value };
     // 表示画面へ同期
     emit('grid-update', grid.value);
     // Rust経由でファイル保存
-    await invoke('save_settings', { config: grid.value });
+    try {
+        await invoke('save_settings', { config: grid.value });
+    } catch (e) { console.error(e); }
     isEditing.value = false;
-    alert("設定を確定・保存しました。");
+    emit('edit-mode-update', false);
+    // alert("設定を確定・保存しました。");
 };
 
 // キャンセル（元の値に戻す）
 const cancelEdit = () => {
     tempGrid.value = { ...grid.value };
     isEditing.value = false;
+    emit('grid-update', { ...grid.value }); // 表示を元に戻す
 };
 
 const spin = () => {
@@ -89,17 +99,39 @@ const resetBingo = () => {
                 <span v-for="num in hitHistory" :key="num" class="history-tag">{{ num }}</span>
             </div>
         </section>
-
         <hr />
-
         <section class="adjust-section">
             <div class="toggle-header" @click="isToggleOpen = !isToggleOpen">
-                <h3>📏 グリッド微調整 (px)</h3>
+                <h3>⚙️ 各種設定 (グリッド・音響)</h3>
                 <span>{{ isToggleOpen ? '▲ 閉じる' : '▼ 開く' }}</span>
             </div>
 
             <div v-if="isToggleOpen" class="toggle-content">
-                <button v-if="!isEditing" class="edit-btn" @click="startEdit">変更を開始する</button>
+                <div class="audio-settings">
+                    <div class="setting-group">
+                        <h4>🔊 効果音 (SE)</h4>
+                        <label><input type="checkbox" v-model="tempGrid.se_enabled"> 有効</label>
+                        <input type="range" min="0" max="100" v-model.number="tempGrid.se_volume"
+                            :disabled="!tempGrid.se_enabled">
+                    </div>
+
+                    <div class="setting-group">
+                        <h4>🗣️ 読み上げ (TTS)</h4>
+                        <label><input type="checkbox" v-model="tempGrid.tts_enabled"> 有効</label>
+                        <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume"
+                            :disabled="!tempGrid.tts_enabled">
+                        <div class="repeat-select" v-if="tempGrid.tts_enabled">
+                            <span>読み上げ回数: </span>
+                            <select v-model.number="tempGrid.tts_repeat_count">
+                                <option v-for="i in 3" :key="i" :value="i">{{ i }}回</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <hr style="opacity: 0.1; margin: 15px 0;" />
+
+                <button v-if="!isEditing" class="edit-btn" @click="startEdit">グリッド位置を調整する</button>
 
                 <div class="sliders" :class="{ 'is-locked': !isEditing }">
                     <label>X: {{ tempGrid.x }}px <input type="range" min="0" max="282" v-model.number="tempGrid.x"
@@ -134,6 +166,28 @@ const resetBingo = () => {
     color: white;
     height: 100vh;
     overflow-y: auto;
+}
+
+.setting-group {
+    margin-bottom: 15px;
+}
+
+.setting-group h4 {
+    margin: 5px 0;
+    font-size: 0.9rem;
+    color: #3498db;
+}
+
+.repeat-select {
+    margin-top: 5px;
+    font-size: 0.8rem;
+}
+
+.repeat-select select {
+    background: #34495e;
+    color: white;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
 }
 
 .spin-btn {

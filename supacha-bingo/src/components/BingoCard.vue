@@ -13,7 +13,18 @@ const SE_WIN_PATH = '/assets/audio/win_confirm.mp3';
 
 // --- 状態管理 ---
 // グリッド配置情報
-const gridPos = ref({ x: 22, y: 103, w: 237, h: 239, hit_scale: 100 });
+const gridPos = ref({
+    x: 22,
+    y: 103,
+    w: 237,
+    h: 239,
+    hit_scale: 100,
+    se_enabled: true,
+    se_volume: 50,
+    tts_enabled: true,
+    tts_volume: 80,
+    tts_repeat_count: 1
+});
 // 当選マスリスト
 const hitNumbers = ref<number[]>([]);
 
@@ -29,14 +40,17 @@ let myConfetti: confetti.CreateTypes | null = null; // インスタンスを保�
 // --- 音響効果 & 音声合成 ---
 const synth = window.speechSynthesis;
 
+// 読み上げ関数の修正（回数指定に対応）
 const speakNumber = (num: number) => {
-    if (!('speechSynthesis' in window)) return;
-    synth.cancel(); // 連続再生時に前の音声をキャンセル
-    const utterance = new SpeechSynthesisUtterance();
-    utterance.text = num.toString();
-    utterance.lang = 'ja-JP';
-    utterance.rate = 1.2;
-    synth.speak(utterance);
+    if (!gridPos.value.tts_enabled) return;
+    window.speechSynthesis.cancel();
+
+    for (let i = 0; i < gridPos.value.tts_repeat_count; i++) {
+        const utterance = new SpeechSynthesisUtterance(num.toString());
+        utterance.lang = 'ja-JP';
+        utterance.volume = gridPos.value.tts_volume / 100;
+        window.speechSynthesis.speak(utterance);
+    }
 };
 
 const playWinSound = () => {
@@ -141,6 +155,11 @@ onMounted(async () => {
         showBorder.value = event.payload;
     });
 
+    // 座標・詳細設定の受信
+    await listen<any>('grid-update', (event) => {
+        gridPos.value = event.payload;
+    });
+
     // ビンゴ当選イベント
     await listen<{ number: number }>('bingo-hit', (event) => {
         const finalNum = event.payload.number;
@@ -188,8 +207,8 @@ onMounted(async () => {
                 <span class="cell-num">{{ n }}</span>
                 <transition name="pop">
                     <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="hit-mark-img" :style="{
-                        width: (gridPos.hit_scale * 1.4) + '%',
-                        height: (gridPos.hit_scale * 1.4) + '%',
+                        width: (gridPos.hit_scale * 1.5) + '%',
+                        height: (gridPos.hit_scale * 1.5) + '%',
                     }" />
                 </transition>
             </div>
