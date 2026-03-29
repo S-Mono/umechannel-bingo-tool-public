@@ -18,12 +18,15 @@ const hitHistory = ref<number[]>([]);
 onMounted(async () => {
     try {
         const saved = await invoke<any>('load_settings');
-        // 【重要】既存の初期値に、保存された値をマージする（新項目が消えないように）
+        // 【重要】既存のデフォルト値に、保存された値を上書きマージする
+        // これにより、保存ファイルに項目が足りなくても undefined になりません
         grid.value = { ...grid.value, ...saved };
-        tempGrid.value = { ...saved };
-        // 起動時に現在の値を表示側に同期
+        tempGrid.value = { ...grid.value };
         emit('grid-update', grid.value);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+        console.error("設定の読み込みに失敗しました。デフォルト値を使用します:", e);
+        console.error(e);
+    }
 });
 
 // 編集中の値を一時的に保持する変数

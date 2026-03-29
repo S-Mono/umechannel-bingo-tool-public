@@ -15,11 +15,11 @@ pub struct BingoConfig {
     pub w: f64,
     pub h: f64,
     pub hit_scale: f64,
-    pub se_enabled: bool,
-    pub se_volume: f64,      // 0.0 ~ 100.0
-    pub tts_enabled: bool,
-    pub tts_volume: f64,     // 0.0 ~ 100.0
-    pub tts_repeat_count: i32, // 1 ~ 3,
+    pub se_enabled: bool,      // 追加：これがないと保存時に落ちます
+    pub se_volume: f64,        // 追加
+    pub tts_enabled: bool,     // 追加
+    pub tts_volume: f64,       // 追加
+    pub tts_repeat_count: i32, // 追加
 }
 
 const CONFIG_PATH: &str = "bingo_config.json";
@@ -41,14 +41,14 @@ fn load_settings() -> Result<BingoConfig, String> {
         // 初期値（282x368の画面に合わせたpx指定の目安）
         Ok(BingoConfig {
             x: 22.0, 
-            y: 103.0,
+            y: 109.0,
             w: 237.0,
             h: 239.0,
             hit_scale: 100.0,
             se_enabled: true,
-            se_volume: 0.5,
+            se_volume: 50.0,
             tts_enabled: true,
-            tts_volume: 1.0,
+            tts_volume: 80.0,
             tts_repeat_count: 1, })
     }
 }

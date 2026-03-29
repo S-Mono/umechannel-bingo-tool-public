@@ -14,16 +14,9 @@ const SE_WIN_PATH = '/assets/audio/win_confirm.mp3';
 // --- 状態管理 ---
 // グリッド配置情報
 const gridPos = ref({
-    x: 22,
-    y: 103,
-    w: 237,
-    h: 239,
-    hit_scale: 100,
-    se_enabled: true,
-    se_volume: 50,
-    tts_enabled: true,
-    tts_volume: 80,
-    tts_repeat_count: 1
+    x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
+    se_enabled: true, se_volume: 50,
+    tts_enabled: true, tts_volume: 80, tts_repeat_count: 1
 });
 // 当選マスリスト
 const hitNumbers = ref<number[]>([]);
