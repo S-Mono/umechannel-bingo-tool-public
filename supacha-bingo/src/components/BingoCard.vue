@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { listen } from '@tauri-apps/api/event';
+import confetti from 'canvas-confetti';
 
 // アセットパス定義
 const BG_IMAGE_PATH = '/assets/background.png';
@@ -20,6 +21,10 @@ const hitNumbers = ref<number[]>([]);
 const isSpinning = ref(false); // 抽選中フラグ
 const rouletteNumber = ref<number | null>(null); // ルーレットに表示する数字
 let spinAudio: HTMLAudioElement | null = null; // ループ音のオーディオオブジェクト
+
+// 【新規】紙吹雪用のcanvas要素のref
+const confettiCanvas = ref<HTMLCanvasElement | null>(null);
+let myConfetti: confetti.CreateTypes | null = null; // インスタンスを保持
 
 // --- 音響効果 & 音声合成 ---
 const synth = window.speechSynthesis;
@@ -41,9 +46,37 @@ const playWinSound = () => {
     audio.play().catch(e => console.error("Audio play failed:", e));
 };
 
+// --- 【新規】紙吹雪を発射するロジック ---
+const fireConfetti = () => {
+    if (!confettiCanvas.value) return;
+
+    // 初回のみインスタンス化（パフォーマンス対策）
+    if (!myConfetti) {
+        myConfetti = confetti.create(confettiCanvas.value, {
+            resize: true, // ウィンドウサイズ変更に追従
+            useWorker: true // パフォーマンス向上のためWorkerを使用
+        });
+    }
+
+    // 発射設定 (ツールの色に合わせる: 金, 赤, 白)
+    const colors = ['#f1c40f', '#e74c3c', '#ffffff'];
+
+    // 【提案】抽選エリア (top: 30px, left: 50%) を中心に、少し下向きに広がるように発射
+    myConfetti({
+        particleCount: 200, // 粒子数
+        spread: 100, // 広がり（少し広めに）
+        origin: { y: -0.1, x: 0.5 }, // ウィンドウ上部中央 (抽選エリア付近)
+        colors: colors,
+        gravity: 0.75, // 重力（少し軽めに長く降らせる）
+        drift: 0, // 横方向のドリフト
+        ticks: 350, // 粒子が消えるまでの時間（少し長めに）
+        shapes: ['square', 'circle'], // 形
+        scalar: 0.9 // 粒子の大きさ
+    });
+};
+
 // --- ルーレットアニメーションロジック ---
 let rouletteIntervalId: number | null = null;
-
 const startRouletteAnimation = (finalNumber: number) => {
     if (isSpinning.value) return; // 二重再生防止
     isSpinning.value = true;
@@ -84,6 +117,9 @@ const stopRouletteAnimation = (finalNumber: number) => {
     playWinSound(); // 効果音
     speakNumber(finalNumber); // 読み上げ
 
+    // 【新規】当選確定時に紙吹雪を発射
+    fireConfetti();
+
     // 【重要】アニメーション完了後にグリッドへスタンプを反映
     if (!hitNumbers.value.includes(finalNumber)) {
         hitNumbers.value.push(finalNumber);
@@ -117,6 +153,8 @@ onMounted(async () => {
 <template>
     <div class="bingo-view-container" data-tauri-drag-region>
         <img :src="BG_IMAGE_PATH" class="card-bg-img" alt="Bingo Card Background" />
+
+        <canvas ref="confettiCanvas" class="confetti-canvas"></canvas>
 
         <div class="lottery-display-area" :style="{
             backgroundColor: 'rgba(0, 0, 0, 0.7)', /* 半透明の黒背景で数字を際立たせる */
@@ -170,6 +208,18 @@ onMounted(async () => {
     height: 100%;
     object-fit: contain;
     pointer-events: none;
+}
+
+/* 3. canvas のスタイル。ウィンドウ全体に広げ、マウスイベントを透過させる */
+.confetti-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 5;
+    /* スタンプ (10) より下、背景より上 */
 }
 
 /* --- 【新規】ルーレット表示スタイル --- */
