@@ -13,6 +13,10 @@ const grid = ref({
 const isToggleOpen = ref(false);
 // 当選履歴
 const hitHistory = ref<number[]>([]);
+const currentFile = ref<string | null>(null); // 操作対象のファイル名
+const isLive = ref(false); // 本番書き込み権限フラグ
+const redoStack = ref<number[]>([]); // Redo用のスタック
+const sessionFiles = ref<string[]>([]); // 過去ファイル一覧
 // 【追加】アニメーション中フラグ
 const isAnimating = ref(false);
 
@@ -24,17 +28,62 @@ onMounted(async () => {
         // 【修正】マージ後の完全なオブジェクトを tempGrid に渡す
         tempGrid.value = { ...grid.value };
         emit('grid-update', grid.value);
+        await refreshSessionList();
 
         // 【追加】アニメーション完了通知を受信して履歴を更新
-        await listen<{ number: number }>('bingo-animation-finished', (event) => {
+        await listen<{ number: number }>('bingo-animation-finished', async (event) => {
+            if (!isLive.value) return;
             hitHistory.value.push(event.payload.number);
-            isAnimating.value = false; // ガード解除
+            isAnimating.value = false;
+            // saveSession() ではなく persistHits() を呼ぶことで、1ファイルを更新し続ける
+            await persistHits();
         });
+
     } catch (e) {
         console.error("設定の読み込みに失敗しました。デフォルト値を使用します:", e);
         console.error(e);
     }
 });
+
+// 新規ビンゴ開始
+const startNewBingo = async () => {
+    if (hitHistory.value.length > 0 && !confirm("現在の履歴を破棄して新規開始しますか？")) return;
+
+    hitHistory.value = [];
+    currentFile.value = null; // 次の保存で新規作成
+    isLive.value = true;
+    emit('bingo-reset', {});
+};
+
+// 過去ログの「閲覧」
+const previewSession = async (filename: string) => {
+    if (!filename) return;
+    const hits = await invoke<number[]>('load_session', { filename });
+    hitHistory.value = hits;
+    currentFile.value = filename;
+    isLive.value = false; // 閲覧モードへ
+    syncBingoCard();
+};
+
+// 「本番モード」への昇格
+const activateLiveMode = () => {
+    isLive.value = true;
+};
+
+// 履歴保存（常に currentFile に対して行う）
+const persistHits = async () => {
+    if (!isLive.value) return;
+    const confirmedFile = await invoke<string>('save_session', {
+        filename: currentFile.value, // これにより既存ファイルがあれば上書き、なければ新規
+        hits: hitHistory.value
+    });
+    currentFile.value = confirmedFile;
+    await refreshSessionList();
+};
+
+const refreshSessionList = async () => {
+    sessionFiles.value = await invoke('get_sessions');
+};
 
 // 編集中の値を一時的に保持する変数
 const tempGrid = ref({ ...grid.value });
@@ -84,11 +133,47 @@ const spin = () => {
         .filter(n => !hitHistory.value.includes(n));
     if (available.length === 0) return alert("全て当選済みです");
 
+    // 新しいスピンが発生したら Redo スタックをクリアする（論理的一貫性）
+    redoStack.value = [];
+
     const num = available[Math.floor(Math.random() * available.length)];
     isAnimating.value = true; // ガード開始
-
     emit('bingo-hit', { number: num });
 };
+// --- Undo / Redo ロジック ---
+const undo = async () => {
+    if (hitHistory.value.length === 0 || isAnimating.value) return;
+    const last = hitHistory.value.pop();
+    if (last) redoStack.value.push(last);
+    syncBingoCard();
+    await persistHits(); // Undo後も即座にファイル更新
+};
+
+const redo = async () => {
+    if (redoStack.value.length === 0 || isAnimating.value) return;
+    const last = redoStack.value.pop();
+    if (last) hitHistory.value.push(last);
+    syncBingoCard();
+    await persistHits(); // Undo後も即座にファイル更新
+};
+
+// 表示画面の状態を強制同期
+const syncBingoCard = () => {
+    emit('bingo-sync-hits', { hits: [...hitHistory.value] });
+};
+
+// const saveSession = async () => {
+//     await invoke('save_session', { hits: hitHistory.value });
+//     await refreshSessionList();
+// };
+
+// const loadPastSession = async (filename: string) => {
+//     if (!filename) return;
+//     const loadedHits = await invoke<number[]>('load_session', { filename });
+//     hitHistory.value = loadedHits;
+//     redoStack.value = [];
+//     syncBingoCard();
+// };
 
 const resetBingo = () => {
     if (confirm("履歴をリセットしますか？")) {
@@ -96,19 +181,45 @@ const resetBingo = () => {
         emit('bingo-reset', {});
     }
 };
-
 </script>
 
 <template>
     <div class="panel">
         <h3>🎡 Bingo Operation</h3>
 
-        <section class="spin-section">
-            <button class="spin-btn" :class="{ 'is-animating': isAnimating }" :disabled="isAnimating" @click="spin">
-                {{ isAnimating ? '抽選中...' : 'SPIN BINGO' }}
-            </button>
-            <button class="reset-btn" @click="resetBingo">RESET</button>
+        <section class="session-mgr-section">
+            <div class="session-controls">
+                <button @click="startNewBingo" class="btn-new">✨ 新規ビンゴ開始</button>
+
+                <select @change="e => previewSession((e.target as HTMLSelectElement).value)">
+                    <option value="">過去ログを閲覧・ロード...</option>
+                    <option v-for="f in sessionFiles" :key="f" :value="f">{{ f }}</option>
+                </select>
+
+                <button v-if="currentFile && !isLive" @click="activateLiveMode" class="btn-resume">
+                    ▶ この履歴で本番再開
+                </button>
+            </div>
+            <div v-if="currentFile" class="current-file-info">
+                📄: {{ currentFile }} <span v-if="isLive" class="live-badge">LIVE</span>
+            </div>
         </section>
+
+        <hr />
+
+        <div class="main-actions">
+            <button class="spin-btn" :disabled="!isLive || isAnimating" @click="spin">
+                <template v-if="!isLive">⚠️ 閲覧モード（スピン不可）</template>
+                <template v-else>{{ isAnimating ? '抽選中...' : 'SPIN BINGO' }}</template>
+            </button>
+
+            <div class="step-actions">
+                <button @click="undo" :disabled="!isLive || hitHistory.length === 0 || isAnimating">Undo</button>
+                <button @click="redo" :disabled="!isLive || redoStack.length === 0 || isAnimating">Redo</button>
+            </div>
+
+            <button v-if="isLive" class="reset-btn" @click="resetBingo">セッションを終了してリセット</button>
+        </div>
 
         <section class="history-section">
             <h4>当選履歴 ({{ hitHistory.length }} / 25)</h4>
@@ -159,14 +270,17 @@ const resetBingo = () => {
                     </div>
                     <div class="sliders">
                         <label>X: <input type="range" min="0" max="282" v-model.number="tempGrid.x" /><span
-                                class="val">{{ tempGrid.x }}px</span></label>
+                                class="val">{{
+                                    tempGrid.x }}px</span></label>
                         <label>Y: <input type="range" min="0" max="368" v-model.number="tempGrid.y" /><span
-                                class="val">{{ tempGrid.y }}px</span></label>
+                                class="val">{{
+                                    tempGrid.y }}px</span></label>
                         <label>W: <input type="range" min="0" max="282" v-model.number="tempGrid.w" /><span
-                                class="val">{{ tempGrid.w }}px</span></label>
+                                class="val">{{
+                                    tempGrid.w }}px</span></label>
                         <label>H: <input type="range" min="0" max="368" v-model.number="tempGrid.h" /><span
-                                class="val">{{ tempGrid.h }}px</span></label>
-
+                                class="val">{{
+                                    tempGrid.h }}px</span></label>
                         <label class="hit-scale-label">
                             🎯 スタンプ縮尺: <input type="range" min="10" max="200" v-model.number="tempGrid.hit_scale" />
                             <span class="val">{{ tempGrid.hit_scale }}%</span>

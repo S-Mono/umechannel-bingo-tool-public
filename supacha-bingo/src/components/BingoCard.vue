@@ -185,6 +185,13 @@ onMounted(async () => {
         hitNumbers.value = [];
         rouletteNumber.value = null; // ルーレット表示もリセット
     });
+
+    // 強制同期イベント（Undo/Redo/ロード用）
+    await listen<{ hits: number[] }>('bingo-sync-hits', (event) => {
+        // アニメーションなしで即座に反映
+        hitNumbers.value = event.payload.hits;
+        rouletteNumber.value = null;
+    });
 });
 </script>
 
@@ -218,8 +225,8 @@ onMounted(async () => {
                 <span class="cell-num">{{ n }}</span>
                 <transition name="pop">
                     <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="hit-mark-img" :style="{
-                        width: (gridPos.hit_scale * 1.4) + '%',
-                        height: (gridPos.hit_scale * 1) + '%',
+                        width: (gridPos.hit_scale * 1.5) + '%',
+                        height: (gridPos.hit_scale * 1.5) + '%',
                     }" />
                 </transition>
             </div>
@@ -308,13 +315,17 @@ onMounted(async () => {
 
 .cell {
     position: relative;
-    display: grid;
-    place-items: center;
+    display: flex;
+    /* 垂直方向中央 */
+    align-items: center;
+    /* 水平方向中央 */
+    justify-content: center;
+    overflow: hidden;
     overflow: hidden;
     /* デフォルトでは枠線を透明にしておくことで、ガタつきを防ぐ */
     border: 1px solid transparent;
-    box-sizing: border-box;
     /* 枠線が表示されてもサイズが変わらないように設定 */
+    box-sizing: border-box;
 }
 
 /* 【追加】編集モード中の枠線スタイル */
