@@ -2,48 +2,44 @@
 import { ref, onMounted } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 
-/**
- * 【注意】publicフォルダ内のアセットは直接パス文字列で指定します。
- * 拡張子が .jpg か .png か、実際のファイル名と完全に一致させてください。
- */
-const BG_PATH = '/assets/background.jpg';
-const HIT_MARK_PATH = '/assets/hit-mark.png';
+const BG_IMAGE_PATH = '/assets/background.png';
+const HIT_MARK_IMAGE_PATH = '/assets/hit_mark.png';
 
-// 状態管理
-const gridPos = ref({ x: 22, y: 103, w: 237, h: 239 });
+// 初期値に hit_scale を追加
+const gridPos = ref({ x: 22, y: 103, w: 237, h: 239, hit_scale: 100 });
 const hitNumbers = ref<number[]>([]);
 
 onMounted(async () => {
-    console.log("Display window: Initialized.");
-
-    // 操作パネルからの位置更新イベントを購読
     await listen<any>('grid-update', (event) => {
         gridPos.value = event.payload;
-    });
-
-    // ビンゴヒット（当選）イベントを購読
+    }
+    );
     await listen<any>('bingo-hit', (event) => {
         if (!hitNumbers.value.includes(event.payload.number)) {
             hitNumbers.value.push(event.payload.number);
         }
     });
+    // 追加: リセットイベントの受診
+    await listen('bingo-reset', () => { hitNumbers.value = []; });
 });
 </script>
 
 <template>
     <div class="bingo-view-container" data-tauri-drag-region>
-        <img :src="BG_PATH" class="card-bg-img" alt="Bingo Card Background" />
+        <img :src="BG_IMAGE_PATH" class="card-bg-img" alt="Bingo Card Background" />
 
         <div class="grid-layer" :style="{
-            left: gridPos.x + 'px',
-            top: gridPos.y + 'px',
-            width: gridPos.w + 'px',
-            height: gridPos.h + 'px'
+            left: gridPos.x + 'px', top: gridPos.y + 'px',
+            width: gridPos.w + 'px', height: gridPos.h + 'px',
+            pointerEvents: 'none'
         }">
             <div v-for="n in 25" :key="n" class="cell">
                 <span class="cell-num">{{ n }}</span>
                 <transition name="pop">
-                    <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_PATH" class="hit-mark-img" />
+                    <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="hit-mark-img" :style="{
+                        width: gridPos.hit_scale + '%',
+                        height: gridPos.hit_scale + '%'
+                    }" />
                 </transition>
             </div>
         </div>
@@ -57,8 +53,9 @@ onMounted(async () => {
     position: relative;
     overflow: hidden;
     background-color: transparent;
+    /* 重要: 枠なしウィンドウで確実にドラッグさせるための設定 */
     cursor: move;
-    /* 枠なしウィンドウを移動可能にするためのヒント */
+    -webkit-app-region: drag;
 }
 
 .card-bg-img {
@@ -69,7 +66,6 @@ onMounted(async () => {
     height: 100%;
     object-fit: contain;
     pointer-events: none;
-    /* ドラッグ操作の邪魔をしない */
 }
 
 .grid-layer {
@@ -78,7 +74,8 @@ onMounted(async () => {
     grid-template-columns: repeat(5, 1fr);
     grid-template-rows: repeat(5, 1fr);
     gap: 1px;
-    cursor: default;
+    /* 子要素（数字やスタンプ）がドラッグ操作を邪魔しないようにする */
+    pointer-events: none;
 }
 
 .cell {
@@ -86,7 +83,6 @@ onMounted(async () => {
     display: flex;
     align-items: center;
     justify-content: center;
-    /* border: 1px solid rgba(255, 255, 255, 0.1); // デバッグ用 */
 }
 
 .cell-num {
@@ -98,13 +94,13 @@ onMounted(async () => {
     opacity: 0.3;
 }
 
+/* hit-mark-img の固定の width/height を削除、または基準値にする */
 .hit-mark-img {
     position: absolute;
-    width: 95%;
-    height: 95%;
+    /* 固定の width, height を削除、または基準値にする */
     object-fit: contain;
-    pointer-events: none;
     z-index: 10;
+    pointer-events: none;
 }
 
 .pop-enter-active {
