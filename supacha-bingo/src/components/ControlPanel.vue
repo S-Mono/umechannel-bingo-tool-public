@@ -17,7 +17,7 @@ interface GridConfig {
 
 const grid = ref<GridConfig>({
     x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
-    se_enabled: true, se_volume: 20, tts_enabled: true, tts_volume: 40, tts_repeat_count: 1
+    se_enabled: true, se_volume: 50, tts_enabled: true, tts_volume: 50, tts_repeat_count: 1
 });
 const tempGrid = ref<GridConfig>({ ...grid.value });
 const hitHistory = ref<number[]>([]);
@@ -45,7 +45,7 @@ onMounted(async () => {
                 hitHistory.value.push(event.payload.number);
             }
             isAnimating.value = false;
-            await persistHits();
+            await persistHits('HIT'); // 抽選ヒットによる保存
         });
     } catch (e) { console.error(e); }
 });
@@ -66,7 +66,23 @@ const startNewBingo = async () => {
 };
 
 const previewSession = async (filename: string) => {
-    if (!filename) return;
+    if (!filename) {
+        // 未選択（空）にした際の状態クリア
+        currentFile.value = null;
+        hitHistory.value = [];
+        redoStack.value = [];
+        isLive.value = false;
+        emit('bingo-reset', {});
+
+        // アクションログを記録
+        await invoke('log_action', {
+            trigger: 'CLOSE',
+            message: 'プレビューを終了し、未選択状態に戻りました。'
+        });
+        return;
+    }
+
+    // 既存の読み込み処理
     const hits = await invoke<number[]>('load_session', { filename });
     hitHistory.value = hits;
     currentFile.value = filename;
@@ -74,16 +90,20 @@ const previewSession = async (filename: string) => {
     emit('bingo-sync-hits', { hits: [...hits] });
 };
 
-const persistHits = async () => {
+// 引数 trigger を追加し、デフォルト値を 'AUTO' に設定
+const persistHits = async (trigger: string = 'AUTO') => {
     if (!isLive.value) return;
     try {
         const confirmedFile = await invoke<string>('save_session', {
             filename: currentFile.value,
-            hits: hitHistory.value
+            hits: hitHistory.value,
+            trigger: trigger // ここで Rust 側に契機を送信
         });
         currentFile.value = confirmedFile;
         await refreshSessionList();
-    } catch (e) { console.error("Save Error:", e); }
+    } catch (e) {
+        console.error("Save Error:", e);
+    }
 };
 
 /** --- 4. ビンゴ操作 --- */
@@ -125,7 +145,7 @@ const undo = async () => {
     const last = hitHistory.value.pop();
     if (last) redoStack.value.push(last);
     emit('bingo-sync-hits', { hits: [...hitHistory.value] });
-    await persistHits();
+    await persistHits('UNDO'); // 元に戻す操作による保存
 };
 
 const redo = async () => { // 欠落していた関数を再定義
@@ -133,17 +153,23 @@ const redo = async () => { // 欠落していた関数を再定義
     const last = redoStack.value.pop();
     if (last) hitHistory.value.push(last);
     emit('bingo-sync-hits', { hits: [...hitHistory.value] });
-    await persistHits();
+    await persistHits('REDO'); // やり直す操作による保存
 };
 
-const resetBingo = async () => { // async を追加
+const resetBingo = async () => {
     const confirmed = await modal.value?.show("履歴をリセットし、\nセッションを終了しますか？", "confirm");
     if (confirmed) {
         hitHistory.value = [];
-        currentFile.value = null;
+        currentFile.value = null; // ここで null にすることで UI も未選択に戻る
         redoStack.value = [];
         isLive.value = false;
         emit('bingo-reset', {});
+
+        // アクションログを記録
+        await invoke('log_action', {
+            trigger: 'RESET',
+            message: '履歴を完全にクリアし、セッションを初期状態に戻しました。'
+        });
     }
 };
 
@@ -170,7 +196,7 @@ const cancelEdit = () => {
         <section class="session-mgr">
             <button class="btn-primary" @click="startNewBingo">✨ 新規開始</button>
             <div class="load-group">
-                <select @change="e => previewSession((e.target as HTMLSelectElement).value)">
+                <select :value="currentFile || ''" @change="e => previewSession((e.target as HTMLSelectElement).value)">
                     <option value="">過去ログを表示（閲覧）</option>
                     <option v-for="f in sessionFiles" :key="f" :value="f">{{ f }}</option>
                 </select>
@@ -224,9 +250,11 @@ const cancelEdit = () => {
                         <div class="tts-row">
                             <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume"
                                 :disabled="!tempGrid.tts_enabled">
-                            <select v-if="tempGrid.tts_enabled" v-model.number="tempGrid.tts_repeat_count"
-                                class="tts-select">
-                                <option v-for="i in 3" :key="i" :value="i">{{ i }}回</option>
+                        </div>
+                        <div v-if="tempGrid.tts_enabled" class="setting-item">
+                            <label class="item-label">読み上げ回数:</label>
+                            <select v-model.number="tempGrid.tts_repeat_count" class="tts-select full-width">
+                                <option v-for="i in 3" :key="i" :value="i">{{ i }}回読み上げ</option>
                             </select>
                         </div>
                     </div>

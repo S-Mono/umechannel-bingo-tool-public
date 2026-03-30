@@ -1,7 +1,7 @@
 {
   "productName": "supacha-bingo",
   "version": "0.1.0",
-  "identifier": "com.umechannel.bingo",
+  "identifier": "com.supacha.bingo",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -37,6 +37,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "wix": {
+        "language": "ja-JP"
+      },
+      "nsis":{
+        "languages": ["Japanese"], 
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "publisher": "aki缶/UmeChannel",
+    "copyright": "Copyright © 2026 aki缶/UmeChannelProject. All rights reserved."
   }
 }

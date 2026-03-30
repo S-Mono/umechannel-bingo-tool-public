@@ -153,8 +153,13 @@ const startRoulette = (final: number) => {
             spinAudio = new Audio(SE_SPIN_PATH);
             spinAudio.loop = true;
         }
+        // 設定からSE音量（0-100）を取得
+        const baseVolume = gridPos.value.se_volume / 100;
+        // SPIN SE専用の減衰係数（例: 0.6倍にする）
+        const SPIN_GAIN_COEFFICIENT = 0.3;
+        // 音量を設定して再生（ループするのでcurrentTimeもリセット）
         spinAudio.currentTime = 0;
-        spinAudio.volume = gridPos.value.se_volume / 100;
+        spinAudio.volume = baseVolume * SPIN_GAIN_COEFFICIENT;
         spinAudio.play().catch(console.error);
     }
     const interval = setInterval(() => {
