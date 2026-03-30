@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BingoConfig {
@@ -15,20 +16,29 @@ pub struct BingoSession {
     pub hits: Vec<i32>,
 }
 
-const CONFIG_PATH: &str = "bingo_config.json";
-const SESSIONS_DIR: &str = "sessions";
+// ヘルパー関数: 安全な保存先ディレクトリを取得
+fn get_app_data_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path().app_local_data_dir().map_err(|e| e.to_string())
+}
 
 #[tauri::command]
-fn save_settings(config: BingoConfig) -> Result<(), String> {
+fn save_settings(app: AppHandle, config: BingoConfig) -> Result<(), String> {
+    let mut path = get_app_data_path(&app)?;
+    fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    path.push("bingo_config.json");
+    
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(CONFIG_PATH, json).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn load_settings() -> Result<BingoConfig, String> {
-    if Path::new(CONFIG_PATH).exists() {
-        let content = fs::read_to_string(CONFIG_PATH).map_err(|e| e.to_string())?;
+fn load_settings(app: AppHandle) -> Result<BingoConfig, String> {
+    let mut path = get_app_data_path(&app)?;
+    path.push("bingo_config.json");
+
+    if path.exists() {
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
         serde_json::from_str(&content).map_err(|e| e.to_string())
     } else {
         Ok(BingoConfig {
@@ -39,50 +49,82 @@ fn load_settings() -> Result<BingoConfig, String> {
 }
 
 #[tauri::command]
-fn save_session(filename: Option<String>, hits: Vec<i32>) -> Result<String, String> {
-    // フォルダがない場合は再帰的に作成。エラーならパニックせずResultで返す
-    if !Path::new(SESSIONS_DIR).exists() {
-        fs::create_dir_all(SESSIONS_DIR).map_err(|e| format!("Directory creation failed: {}", e))?;
-    }
+fn save_session(app: AppHandle, filename: Option<String>, hits: Vec<i32>) -> Result<String, String> {
+    let mut dir = get_app_data_path(&app)?;
+    dir.push("sessions");
+    fs::create_dir_all(&dir).map_err(|e| format!("Dir creation failed: {}", e))?;
 
     let file_name = match filename {
         Some(f) if !f.is_empty() => f,
         _ => {
             let now = chrono::Local::now();
-            format!("session_{}.json", now.format("%Y%m%d_%H%M%S"))
+            format!("LIVE_at_{}.json", now.format("%Y年%m月%d日_%H時%M分%S秒"))
         }
     };
 
-    let path = Path::new(SESSIONS_DIR).join(&file_name);
+    let file_path = dir.join(&file_name);
     let session = BingoSession { timestamp: file_name.clone(), hits };
     let json = serde_json::to_string_pretty(&session).map_err(|e| e.to_string())?;
     
-    fs::write(path, json).map_err(|e| format!("File write failed: {}", e))?;
+    fs::write(file_path, json).map_err(|e| format!("File write failed: {}", e))?;
     Ok(file_name)
 }
 
 #[tauri::command]
-fn get_sessions() -> Result<Vec<String>, String> {
-    if !Path::new(SESSIONS_DIR).exists() { return Ok(vec![]); }
-    let paths = fs::read_dir(SESSIONS_DIR).map_err(|e| e.to_string())?;
-    let mut files: Vec<String> = paths.filter_map(|p| p.ok())
+fn get_sessions(app: AppHandle) -> Result<Vec<String>, String> {
+    let mut dir = get_app_data_path(&app)?;
+    dir.push("sessions");
+    
+    if !dir.exists() { return Ok(vec![]); }
+    
+    let paths = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let mut files: Vec<String> = paths
+        .filter_map(|p| p.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|f| f.ends_with(".json")).collect();
+        .filter(|f| f.ends_with(".json"))
+        .collect();
     files.sort_by(|a, b| b.cmp(a));
     Ok(files)
 }
 
 #[tauri::command]
-fn load_session(filename: String) -> Result<Vec<i32>, String> {
-    let path = Path::new(SESSIONS_DIR).join(filename);
+fn load_session(app: AppHandle, filename: String) -> Result<Vec<i32>, String> {
+    let mut path = get_app_data_path(&app)?;
+    path.push("sessions");
+    path.push(filename);
+    
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let session: BingoSession = serde_json::from_str(&content).map_err(|e| e.to_string())?;
     Ok(session.hits)
 }
 
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    // 0 は正常終了を意味します
+    app.exit(0);
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![save_settings, load_settings, save_session, get_sessions, load_session])
+        .invoke_handler(tauri::generate_handler![
+            save_settings, 
+            load_settings,
+            save_session,
+            get_sessions,
+            load_session,
+            exit_app
+        ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // mainウィンドウ（設定画面）の場合だけ挙動を変更
+                if window.label() == "main" {
+                    // 標準の「閉じる（破棄）」処理をキャンセル
+                    api.prevent_close();
+                    // 代わりに「非表示」にする
+                    window.hide().unwrap();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

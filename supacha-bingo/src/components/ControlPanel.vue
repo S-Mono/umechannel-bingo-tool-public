@@ -2,7 +2,12 @@
 import { ref, watch, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
+import BingoModal from './BingoModal.vue'; // インポート
 
+// ダイアログの参照
+const modal = ref<InstanceType<typeof BingoModal> | null>(null);
+
+/** --- 1. 型定義と初期状態 --- */
 interface GridConfig {
     [key: string]: any;
     x: number; y: number; w: number; h: number; hit_scale: number;
@@ -10,11 +15,9 @@ interface GridConfig {
     tts_enabled: boolean; tts_volume: number; tts_repeat_count: number;
 }
 
-/** --- 状態管理 --- */
 const grid = ref<GridConfig>({
     x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
-    se_enabled: true, se_volume: 20,
-    tts_enabled: true, tts_volume: 40, tts_repeat_count: 1
+    se_enabled: true, se_volume: 20, tts_enabled: true, tts_volume: 40, tts_repeat_count: 1
 });
 const tempGrid = ref<GridConfig>({ ...grid.value });
 const hitHistory = ref<number[]>([]);
@@ -26,6 +29,7 @@ const isToggleOpen = ref(false);
 const isEditing = ref(false);
 const sessionFiles = ref<string[]>([]);
 
+/** --- 2. ライフサイクル --- */
 onMounted(async () => {
     try {
         const saved = await invoke<any>('load_settings');
@@ -34,7 +38,7 @@ onMounted(async () => {
         emit('grid-update', grid.value);
         await refreshSessionList();
 
-        // 演出完了時に履歴を確定し保存
+        // 演出完了時の処理
         await listen<{ number: number }>('bingo-animation-finished', async (event) => {
             if (!isLive.value) return;
             if (!hitHistory.value.includes(event.payload.number)) {
@@ -48,8 +52,12 @@ onMounted(async () => {
 
 const refreshSessionList = async () => { sessionFiles.value = await invoke<string[]>('get_sessions'); };
 
+/** --- 3. セッション管理 --- */
 const startNewBingo = async () => {
-    if (hitHistory.value.length > 0 && !confirm("現在の履歴を破棄して新規開始しますか？")) return;
+    if (hitHistory.value.length > 0) {
+        const confirmed = await modal.value?.show("現在の履歴から再開せず\n新規開始しますか？", "confirm");
+        if (!confirmed) return;
+    }
     hitHistory.value = [];
     redoStack.value = [];
     currentFile.value = null;
@@ -78,12 +86,36 @@ const persistHits = async () => {
     } catch (e) { console.error("Save Error:", e); }
 };
 
+/** --- 4. ビンゴ操作 --- */
+/**
+ * 指定された範囲 [0, max) で、暗号学的に安全な乱数を生成する
+ * 剰余による偏り（Modulo Bias）を排除した実装
+ */
+const getSecureRandomInt = (max: number): number => {
+    const array = new Uint32Array(1);
+    const range = 0xFFFFFFFF; // 32ビット整数の最大値
+    const limit = range - (range % max); // 偏りを生む余り部分を除外する境界
+
+    let val: number;
+    do {
+        window.crypto.getRandomValues(array);
+        val = array[0];
+    } while (val >= limit); // 境界を超えた場合は再生成（リジェクション・サンプリング）
+
+    return val % max;
+};
 const spin = () => {
     if (!isLive.value || isAnimating.value) return;
     const available = Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
-    if (available.length === 0) return alert("完売しました！");
+    if (available.length === 0) return modal.value?.show("番号はすべて選出しました！", "alert");
     redoStack.value = [];
-    const num = available[Math.floor(Math.random() * available.length)];
+    // --- ガチな選出 ---
+    // 配列の長さに基づいたインデックスをセキュアに選出
+    const randomIndex = getSecureRandomInt(available.length);
+    const num = available[randomIndex];
+    // ------------------
+
+    redoStack.value = [];
     isAnimating.value = true;
     emit('bingo-hit', { number: num });
 };
@@ -96,7 +128,7 @@ const undo = async () => {
     await persistHits();
 };
 
-const redo = async () => { // 欠落していた関数を追加
+const redo = async () => { // 欠落していた関数を再定義
     if (!isLive.value || redoStack.value.length === 0) return;
     const last = redoStack.value.pop();
     if (last) hitHistory.value.push(last);
@@ -104,6 +136,18 @@ const redo = async () => { // 欠落していた関数を追加
     await persistHits();
 };
 
+const resetBingo = async () => { // async を追加
+    const confirmed = await modal.value?.show("履歴をリセットし、\nセッションを終了しますか？", "confirm");
+    if (confirmed) {
+        hitHistory.value = [];
+        currentFile.value = null;
+        redoStack.value = [];
+        isLive.value = false;
+        emit('bingo-reset', {});
+    }
+};
+
+/** --- 5. 設定管理 --- */
 watch(tempGrid, (val) => { emit('grid-update', { ...val }); }, { deep: true });
 watch(isEditing, (val) => { emit('edit-mode-update', val); });
 
@@ -127,25 +171,28 @@ const cancelEdit = () => {
             <button class="btn-primary" @click="startNewBingo">✨ 新規開始</button>
             <div class="load-group">
                 <select @change="e => previewSession((e.target as HTMLSelectElement).value)">
-                    <option value="">過去ログを表示（閲覧のみ）</option>
+                    <option value="">過去ログを表示（閲覧）</option>
                     <option v-for="f in sessionFiles" :key="f" :value="f">{{ f }}</option>
                 </select>
-                <button v-if="currentFile && !isLive" class="btn-resume" @click="isLive = true">▶ 本番として続行</button>
+                <button v-if="currentFile && !isLive" class="btn-resume" @click="isLive = true">▶ 再開</button>
             </div>
             <div v-if="currentFile" class="status-bar">
-                📄: {{ currentFile }} <span v-if="isLive" class="live-badge">LIVE</span>
+                📄: {{ currentFile }} <span v-if="isLive" class="live-tag">LIVE</span>
             </div>
         </section>
 
         <section class="main-mgr">
             <button class="spin-btn" :disabled="!isLive || isAnimating" @click="spin">
-                <template v-if="!isLive">⚠️ 閲覧中（スピン不可）</template>
-                <template v-else>{{ isAnimating ? '抽選中...' : 'SPIN BINGO' }}</template>
+                <template v-if="!isLive">⚠️ 閲覧モード</template>
+                <template v-else>{{ isAnimating ? '抽選中...' : '！抽選開始！' }}</template>
             </button>
             <div class="step-actions">
-                <button :disabled="!isLive || hitHistory.length === 0" @click="undo">Undo</button>
-                <button :disabled="!isLive || redoStack.length === 0" @click="redo">Redo</button>
-                <button class="btn-reset" @click="startNewBingo">RESET</button>
+                <button :disabled="!isLive || hitHistory.length === 0" @click="undo"
+                    :class="{ 'is-disabled': hitHistory.length === 0 }">前に戻す</button>
+                <button :disabled="!isLive || redoStack.length === 0" @click="redo"
+                    :class="{ 'is-disabled': redoStack.length === 0 }">次に進む</button>
+                <button class="btn-reset btn-danger" :disabled="!isLive && hitHistory.length === 0"
+                    @click="resetBingo">リセット</button>
             </div>
         </section>
 
@@ -164,20 +211,38 @@ const cancelEdit = () => {
             <div v-if="isToggleOpen" class="accordion-body">
                 <div class="audio-group">
                     <div class="setting-item">
-                        <label>SE音量: {{ tempGrid.se_volume }}%</label>
-                        <input type="range" min="0" max="100" v-model.number="tempGrid.se_volume">
+                        <label class="item-label">
+                            <input type="checkbox" v-model="tempGrid.se_enabled"> SE音量: {{ tempGrid.se_volume }}%
+                        </label>
+                        <input type="range" min="0" max="100" v-model.number="tempGrid.se_volume"
+                            :disabled="!tempGrid.se_enabled">
                     </div>
                     <div class="setting-item">
-                        <label>TTS音量: {{ tempGrid.tts_volume }}%</label>
-                        <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume">
+                        <label class="item-label">
+                            <input type="checkbox" v-model="tempGrid.tts_enabled"> TTS音量: {{ tempGrid.tts_volume }}%
+                        </label>
+                        <div class="tts-row">
+                            <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume"
+                                :disabled="!tempGrid.tts_enabled">
+                            <select v-if="tempGrid.tts_enabled" v-model.number="tempGrid.tts_repeat_count"
+                                class="tts-select">
+                                <option v-for="i in 3" :key="i" :value="i">{{ i }}回</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
                 <hr class="divider" />
                 <button v-if="!isEditing" class="btn-edit" @click="startEdit">📏 位置調整開始</button>
                 <div v-else class="editing-ui">
-                    <div v-for="key in (['x', 'y', 'w', 'h'] as const)" :key="key" class="slider-row">
-                        <label>{{ key.toUpperCase() }}: {{ tempGrid[key] }}px</label>
-                        <input type="range" min="0" max="400" v-model.number="tempGrid[key]">
+                    <div class="sliders">
+                        <div v-for="key in (['x', 'y', 'w', 'h'] as const)" :key="key" class="slider-row">
+                            <label class="slider-label">{{ key.toUpperCase() }}: {{ tempGrid[key] }}px</label>
+                            <input type="range" min="0" max="400" v-model.number="tempGrid[key]">
+                        </div>
+                        <div class="slider-row highlight">
+                            <label class="slider-label">スタンプ縮尺: {{ tempGrid.hit_scale }}%</label>
+                            <input type="range" min="10" max="200" v-model.number="tempGrid.hit_scale">
+                        </div>
                     </div>
                     <div class="edit-footer">
                         <button class="btn-save" @click="confirmEdit">保存</button>
@@ -186,11 +251,12 @@ const cancelEdit = () => {
                 </div>
             </div>
         </section>
+        <BingoModal ref="modal" />
     </div>
 </template>
 
 <style scoped>
-/* 既存のスタイルをベースに整理 */
+/* 既存のスタイルをベースに、スライダー幅を最適化 */
 .panel {
     padding: 15px;
     background: #1a2a3a;
@@ -224,10 +290,34 @@ section {
     cursor: pointer;
 }
 
+.btn-danger {
+    background: #c0392b !important;
+    /* 深い赤 */
+    color: white;
+    border: 1px solid #a93226;
+    font-weight: bold;
+    transition: all 0.2s;
+}
+
+.btn-danger:hover:not(:disabled) {
+    background: #e74c3c !important;
+    /* ホバーで明るい赤に */
+    box-shadow: 0 0 10px rgba(231, 76, 60, 0.5);
+}
+
+.btn-danger:disabled {
+    background: #2c3e50 !important;
+    border-color: #34495e;
+    opacity: 0.4;
+    cursor: not-allowed;
+    filter: grayscale(1);
+}
+
 .load-group {
     display: flex;
     gap: 8px;
     margin-top: 10px;
+    max-width: 100%;
 }
 
 .load-group select {
@@ -236,6 +326,11 @@ section {
     color: white;
     border-radius: 4px;
     border: 1px solid #444;
+
+    min-width: 0;
+    width: 100%;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .status-bar {
@@ -244,7 +339,7 @@ section {
     color: #bdc3c7;
 }
 
-.live-badge {
+.live-tag {
     background: #e74c3c;
     color: white;
     padding: 1px 4px;
@@ -285,6 +380,18 @@ section {
     cursor: pointer;
 }
 
+.step-actions button:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    /* 白黒にして「機能死」を演出 */
+    filter: grayscale(1);
+}
+
+.history-view h4 {
+    margin: 0 0 8px 0;
+    font-size: 0.85rem;
+}
+
 .tag-cloud {
     display: flex;
     flex-wrap: wrap;
@@ -301,6 +408,58 @@ section {
     font-weight: bold;
 }
 
+/* 【修正】音響・位置調整のレイアウト改善 */
+.setting-item {
+    margin-bottom: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.item-label {
+    font-size: 0.85rem;
+    color: #3498db;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.tts-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.tts-select {
+    background: #2c3e50;
+    color: white;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 2px 5px;
+}
+
+.slider-row {
+    margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.slider-label {
+    font-size: 0.85rem;
+    display: block;
+}
+
+.highlight {
+    color: #f1c40f;
+}
+
+/* スライダーを横いっぱいに広げる */
+input[type="range"] {
+    width: 100%;
+    cursor: pointer;
+}
+
 .accordion-head {
     display: flex;
     justify-content: space-between;
@@ -312,6 +471,16 @@ section {
     border: 0;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
     margin: 15px 0;
+}
+
+.btn-edit {
+    width: 100%;
+    padding: 8px;
+    background: #3498db;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
 }
 
 .edit-footer {
