@@ -195,17 +195,22 @@ fn main() {
 
     // ロギング設定の構築
     let mut log_builder = tauri_plugin_log::Builder::new()
+        // ★ タイムゾーンをローカル（日本時間）に設定
+        .timezone(tauri_plugin_log::TimezoneStrategy::Local)
         .targets([
             Target::new(TargetKind::Stdout),
             Target::new(TargetKind::Webview),
         ]);
 
     if has_write_permission {
-        log_builder = log_builder.target(Target::new(TargetKind::LogDir { 
-            file_name: Some(log_filename) 
-        }));
+        // 【修正】LogDir ではなく Folder(PathBuf) を使用して場所を強制指定する
+        // これにより、exe横の logs フォルダの中に書き込まれるようになります
+        log_builder = log_builder.target(Target::new(TargetKind::Folder(log_dir.clone())));
     }
 
+    // 注意: Folder ターゲットの場合、ファイル名はプラグインが自動生成（日付等）するか、
+    // rotation_strategy に依存します。ファイル名を固定したい場合は、
+    // 以下の通り設定を調整します。
     builder = builder.plugin(log_builder.build());
 
     builder
