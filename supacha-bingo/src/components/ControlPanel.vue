@@ -2,9 +2,8 @@
 import { ref, watch, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
-import BingoModal from './BingoModal.vue'; // インポート
+import BingoModal from './BingoModal.vue';
 
-// ダイアログの参照
 const modal = ref<InstanceType<typeof BingoModal> | null>(null);
 
 /** --- 1. 型定義と初期状態 --- */
@@ -38,19 +37,20 @@ onMounted(async () => {
         emit('grid-update', grid.value);
         await refreshSessionList();
 
-        // 演出完了時の処理
         await listen<{ number: number }>('bingo-animation-finished', async (event) => {
             if (!isLive.value) return;
             if (!hitHistory.value.includes(event.payload.number)) {
                 hitHistory.value.push(event.payload.number);
             }
             isAnimating.value = false;
-            await persistHits('HIT'); // 抽選ヒットによる保存
+            await persistHits('HIT');
         });
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error("Initialize Error:", e); }
 });
 
-const refreshSessionList = async () => { sessionFiles.value = await invoke<string[]>('get_sessions'); };
+const refreshSessionList = async () => {
+    sessionFiles.value = await invoke<string[]>('get_sessions');
+};
 
 /** --- 3. セッション管理 --- */
 const startNewBingo = async () => {
@@ -67,22 +67,14 @@ const startNewBingo = async () => {
 
 const previewSession = async (filename: string) => {
     if (!filename) {
-        // 未選択（空）にした際の状態クリア
         currentFile.value = null;
         hitHistory.value = [];
         redoStack.value = [];
         isLive.value = false;
         emit('bingo-reset', {});
-
-        // アクションログを記録
-        await invoke('log_action', {
-            trigger: 'CLOSE',
-            message: 'プレビューを終了し、未選択状態に戻りました。'
-        });
+        await invoke('log_action', { trigger: 'CLOSE', message: 'プレビュー終了' });
         return;
     }
-
-    // 既存の読み込み処理
     const hits = await invoke<number[]>('load_session', { filename });
     hitHistory.value = hits;
     currentFile.value = filename;
@@ -90,50 +82,39 @@ const previewSession = async (filename: string) => {
     emit('bingo-sync-hits', { hits: [...hits] });
 };
 
-// 引数 trigger を追加し、デフォルト値を 'AUTO' に設定
 const persistHits = async (trigger: string = 'AUTO') => {
     if (!isLive.value) return;
     try {
         const confirmedFile = await invoke<string>('save_session', {
             filename: currentFile.value,
             hits: hitHistory.value,
-            trigger: trigger // ここで Rust 側に契機を送信
+            trigger: trigger
         });
         currentFile.value = confirmedFile;
         await refreshSessionList();
-    } catch (e) {
-        console.error("Save Error:", e);
-    }
+    } catch (e) { console.error("Save Error:", e); }
 };
 
 /** --- 4. ビンゴ操作 --- */
-/**
- * 指定された範囲 [0, max) で、暗号学的に安全な乱数を生成する
- * 剰余による偏り（Modulo Bias）を排除した実装
- */
 const getSecureRandomInt = (max: number): number => {
     const array = new Uint32Array(1);
-    const range = 0xFFFFFFFF; // 32ビット整数の最大値
-    const limit = range - (range % max); // 偏りを生む余り部分を除外する境界
-
+    const range = 0xFFFFFFFF;
+    const limit = range - (range % max);
     let val: number;
     do {
         window.crypto.getRandomValues(array);
         val = array[0];
-    } while (val >= limit); // 境界を超えた場合は再生成（リジェクション・サンプリング）
-
+    } while (val >= limit);
     return val % max;
 };
+
 const spin = () => {
     if (!isLive.value || isAnimating.value) return;
     const available = Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
     if (available.length === 0) return modal.value?.show("番号はすべて選出しました！", "alert");
-    redoStack.value = [];
-    // --- ガチな選出 ---
-    // 配列の長さに基づいたインデックスをセキュアに選出
+
     const randomIndex = getSecureRandomInt(available.length);
     const num = available[randomIndex];
-    // ------------------
 
     redoStack.value = [];
     isAnimating.value = true;
@@ -145,31 +126,26 @@ const undo = async () => {
     const last = hitHistory.value.pop();
     if (last) redoStack.value.push(last);
     emit('bingo-sync-hits', { hits: [...hitHistory.value] });
-    await persistHits('UNDO'); // 元に戻す操作による保存
+    await persistHits('UNDO');
 };
 
-const redo = async () => { // 欠落していた関数を再定義
+const redo = async () => {
     if (!isLive.value || redoStack.value.length === 0) return;
     const last = redoStack.value.pop();
     if (last) hitHistory.value.push(last);
     emit('bingo-sync-hits', { hits: [...hitHistory.value] });
-    await persistHits('REDO'); // やり直す操作による保存
+    await persistHits('REDO');
 };
 
 const resetBingo = async () => {
     const confirmed = await modal.value?.show("履歴をリセットし、\nセッションを終了しますか？", "confirm");
     if (confirmed) {
         hitHistory.value = [];
-        currentFile.value = null; // ここで null にすることで UI も未選択に戻る
+        currentFile.value = null;
         redoStack.value = [];
         isLive.value = false;
         emit('bingo-reset', {});
-
-        // アクションログを記録
-        await invoke('log_action', {
-            trigger: 'RESET',
-            message: '履歴を完全にクリアし、セッションを初期状態に戻しました。'
-        });
+        await invoke('log_action', { trigger: 'RESET', message: 'セッション初期化' });
     }
 };
 
@@ -193,6 +169,7 @@ const cancelEdit = () => {
 <template>
     <div class="panel">
         <h3 class="header">🎡 Bingo Operation</h3>
+
         <section class="session-mgr">
             <button class="btn-primary" @click="startNewBingo">✨ 新規開始</button>
             <div class="load-group">
@@ -234,32 +211,43 @@ const cancelEdit = () => {
                 <span>⚙️ 設定 (位置・音響)</span>
                 <span>{{ isToggleOpen ? '▲' : '▼' }}</span>
             </div>
+
             <div v-if="isToggleOpen" class="accordion-body">
                 <div class="audio-group">
                     <div class="setting-item">
-                        <label class="item-label">
-                            <input type="checkbox" v-model="tempGrid.se_enabled"> SE音量: {{ tempGrid.se_volume }}%
-                        </label>
-                        <input type="range" min="0" max="100" v-model.number="tempGrid.se_volume"
+                        <div class="setting-header">
+                            <label class="item-label">SE音量: {{ tempGrid.se_volume }}%</label>
+                            <button class="toggle-btn" :class="{ 'is-active': tempGrid.se_enabled }"
+                                @click="tempGrid.se_enabled = !tempGrid.se_enabled">
+                                {{ tempGrid.se_enabled ? 'ON' : 'OFF' }}
+                            </button>
+                        </div>
+                        <input type="range" min="0" max="100" v-model.number="tempGrid.se_volume" class="custom-slider"
                             :disabled="!tempGrid.se_enabled">
                     </div>
+
                     <div class="setting-item">
-                        <label class="item-label">
-                            <input type="checkbox" v-model="tempGrid.tts_enabled"> TTS音量: {{ tempGrid.tts_volume }}%
-                        </label>
-                        <div class="tts-row">
-                            <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume"
-                                :disabled="!tempGrid.tts_enabled">
+                        <div class="setting-header">
+                            <label class="item-label">TTS音量: {{ tempGrid.tts_volume }}%</label>
+                            <button class="toggle-btn" :class="{ 'is-active': tempGrid.tts_enabled }"
+                                @click="tempGrid.tts_enabled = !tempGrid.tts_enabled">
+                                {{ tempGrid.tts_enabled ? 'ON' : 'OFF' }}
+                            </button>
                         </div>
-                        <div v-if="tempGrid.tts_enabled" class="setting-item">
-                            <label class="item-label">読み上げ回数:</label>
-                            <select v-model.number="tempGrid.tts_repeat_count" class="tts-select full-width">
-                                <option v-for="i in 3" :key="i" :value="i">{{ i }}回読み上げ</option>
-                            </select>
-                        </div>
+                        <input type="range" min="0" max="100" v-model.number="tempGrid.tts_volume" class="custom-slider"
+                            :disabled="!tempGrid.tts_enabled">
+                    </div>
+
+                    <div v-if="tempGrid.tts_enabled" class="setting-item row-layout">
+                        <label class="item-label no-margin">読み上げ回数</label>
+                        <select v-model.number="tempGrid.tts_repeat_count" class="tts-select compact">
+                            <option v-for="i in 3" :key="i" :value="i">{{ i }}回</option>
+                        </select>
                     </div>
                 </div>
+
                 <hr class="divider" />
+
                 <button v-if="!isEditing" class="btn-edit" @click="startEdit">📏 位置調整開始</button>
                 <div v-else class="editing-ui">
                     <div class="sliders">
@@ -284,7 +272,6 @@ const cancelEdit = () => {
 </template>
 
 <style scoped>
-/* 既存のスタイルをベースに、スライダー幅を最適化 */
 .panel {
     padding: 15px;
     background: #1a2a3a;
@@ -308,6 +295,7 @@ section {
     margin-bottom: 15px;
 }
 
+/* ボタン類 */
 .btn-primary {
     width: 100%;
     padding: 10px;
@@ -320,7 +308,6 @@ section {
 
 .btn-danger {
     background: #c0392b !important;
-    /* 深い赤 */
     color: white;
     border: 1px solid #a93226;
     font-weight: bold;
@@ -329,7 +316,6 @@ section {
 
 .btn-danger:hover:not(:disabled) {
     background: #e74c3c !important;
-    /* ホバーで明るい赤に */
     box-shadow: 0 0 10px rgba(231, 76, 60, 0.5);
 }
 
@@ -345,7 +331,6 @@ section {
     display: flex;
     gap: 8px;
     margin-top: 10px;
-    max-width: 100%;
 }
 
 .load-group select {
@@ -354,11 +339,8 @@ section {
     color: white;
     border-radius: 4px;
     border: 1px solid #444;
-
     min-width: 0;
-    width: 100%;
     text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 .status-bar {
@@ -410,14 +392,7 @@ section {
 
 .step-actions button:disabled {
     opacity: 0.3;
-    cursor: not-allowed;
-    /* 白黒にして「機能死」を演出 */
     filter: grayscale(1);
-}
-
-.history-view h4 {
-    margin: 0 0 8px 0;
-    font-size: 0.85rem;
 }
 
 .tag-cloud {
@@ -436,7 +411,7 @@ section {
     font-weight: bold;
 }
 
-/* 【修正】音響・位置調整のレイアウト改善 */
+/* 設定項目 */
 .setting-item {
     margin-bottom: 15px;
     display: flex;
@@ -444,26 +419,109 @@ section {
     gap: 5px;
 }
 
+.setting-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 5px;
+}
+
+/* 読み上げ回数（横並び） */
+.row-layout {
+    flex-direction: row !important;
+    align-items: center;
+    gap: 4px;
+    margin-top: 5px;
+}
+
+.no-margin {
+    margin-right: 2px;
+}
+
 .item-label {
     font-size: 0.85rem;
     color: #3498db;
     display: flex;
     align-items: center;
-    gap: 8px;
 }
 
-.tts-row {
+/* トグルボタン */
+.toggle-btn {
+    width: 60px;
+    height: 24px;
+    border: 1px solid #444;
+    border-radius: 12px;
+    background: #2c3e50;
+    color: #7f8c8d;
+    font-size: 0.7rem;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s ease;
     display: flex;
-    gap: 10px;
     align-items: center;
+    justify-content: center;
 }
 
-.tts-select {
+.toggle-btn.is-active {
+    background: #27ae60;
+    color: white;
+    border-color: #2ecc71;
+    box-shadow: 0 0 8px rgba(46, 204, 113, 0.4);
+}
+
+/* プルダウン */
+.tts-select.compact {
     background: #2c3e50;
     color: white;
     border: 1px solid #444;
     border-radius: 4px;
-    padding: 2px 5px;
+    padding: 2px 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    min-width: 60px;
+    height: 24px;
+    transition: all 0.2s;
+}
+
+.tts-select.compact:hover:not(:disabled) {
+    border-color: #3498db;
+    background: #34495e;
+}
+
+.tts-select.compact:focus {
+    outline: none;
+    border-color: #3498db;
+    box-shadow: 0 0 8px rgba(52, 152, 219, 0.4);
+}
+
+/* スライダー */
+.custom-slider {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 6px;
+    background: #2c3e50;
+    border-radius: 3px;
+    outline: none;
+}
+
+.custom-slider:disabled {
+    opacity: 0.3;
+}
+
+.custom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    background: #3498db;
+    border: 2px solid #eee;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+}
+
+.custom-slider:not(:disabled)::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+    background: #2980b9;
 }
 
 .slider-row {
@@ -475,17 +533,10 @@ section {
 
 .slider-label {
     font-size: 0.85rem;
-    display: block;
 }
 
 .highlight {
     color: #f1c40f;
-}
-
-/* スライダーを横いっぱいに広げる */
-input[type="range"] {
-    width: 100%;
-    cursor: pointer;
 }
 
 .accordion-head {
