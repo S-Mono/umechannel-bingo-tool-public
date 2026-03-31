@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::AppHandle; // Manager を削除
+use tauri::{AppHandle, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-use log::info; // error を削除（log::error! と直接記述するため）
+use log::info;
 use tauri_plugin_log::{Target, TargetKind};
 
 // --- データ構造体 ---
@@ -38,7 +38,6 @@ fn get_adjacent_path(_app: &AppHandle, sub_path: &str) -> PathBuf {
 
 #[tauri::command]
 fn log_action(trigger: String, message: String) {
-    // 2行構成のログ。save_session と同様のインデントで視認性を統一
     info!("[ACTION] ユーザー操作を受信しました: <{}>", trigger);
     info!("   └ [EVENT] {}", message);
 }
@@ -79,11 +78,22 @@ fn load_settings(app: AppHandle) -> Result<BingoConfig, String> {
         info!("設定の読み込みに成功しました。");
         Ok(config)
     } else {
-        info!("設定ファイルが見つからないため、初期設定値を適用します。");
-        Ok(BingoConfig {
+        // ファイルが存在しない場合（初回起動時）
+        info!("設定ファイルが見つからないため、初期設定値を作成して保存します。");
+        let default_config = BingoConfig {
             x: 22.0, y: 109.0, w: 237.0, h: 239.0, hit_scale: 100.0,
             se_enabled: true, se_volume: 50.0, tts_enabled: true, tts_volume: 50.0, tts_repeat_count: 1,
-        })
+        };
+
+        // デフォルト値をJSON化して保存
+        let json = serde_json::to_string_pretty(&default_config).map_err(|e| e.to_string())?;
+        fs::write(&path, json).map_err(|e| {
+            log::error!("初期設定ファイルの作成に失敗しました: {}", e);
+            e.to_string()
+        })?;
+
+        info!("初期設定ファイルを正常に作成しました。");
+        Ok(default_config)
     }
 }
 
@@ -92,16 +102,11 @@ fn save_session(
     app: AppHandle, 
     filename: Option<String>, 
     hits: Vec<i32>, 
-    trigger: String  // フロントエンドから受け取る契機
+    trigger: String 
 ) -> Result<String, String> {
-    
-    // --- 1行目: アクションの発生を記録 ---
     info!("[ACTION] ユーザー操作を受信しました: <{}>", trigger);
-
     let dir = get_adjacent_path(&app, "sessions");
-    if !dir.exists() {
-        let _ = fs::create_dir_all(&dir);
-    }
+    if !dir.exists() { let _ = fs::create_dir_all(&dir); }
 
     let file_name = match filename {
         Some(f) if !f.is_empty() => f,
@@ -117,33 +122,19 @@ fn save_session(
         format!("保存失敗: {}", e)
     })?;
 
-    // --- 2行目: 保存結果を記録（インデントをつけて因果関係を表現） ---
     let last_num = hits.last().cloned().unwrap_or(0);
     info!("   └ [SAVE] セッションを更新: {} (最新: {}, 合計: {}件)", file_name, last_num, hits.len());
-
     Ok(file_name)
 }
 
 #[tauri::command]
 fn get_sessions(app: AppHandle) -> Result<Vec<String>, String> {
     let dir = get_adjacent_path(&app, "sessions");
-    
-    // 正常系の「スキャン開始ログ」を削除（ここが冗長の原因）
     if !dir.exists() { return Ok(vec![]); }
-    
-    let paths = fs::read_dir(&dir).map_err(|e| {
-        log::error!("スキャン失敗: {}", e);
-        e.to_string()
-    })?;
-
-    let mut files: Vec<String> = paths
-        .filter_map(|p| p.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|f| f.ends_with(".json"))
-        .collect();
-
+    let paths = fs::read_dir(&dir).map_err(|e| { log::error!("スキャン失敗: {}", e); e.to_string() })?;
+    let mut files: Vec<String> = paths.filter_map(|p| p.ok()).map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|f| f.ends_with(".json")).collect();
     files.sort_by(|a, b| b.cmp(a));
-    // 「〇〇件検出しました」も削除し、必要な時だけログを見るようにする
     Ok(files)
 }
 
@@ -152,24 +143,15 @@ fn load_session(app: AppHandle, filename: String) -> Result<Vec<i32>, String> {
     info!("セッションの復元を開始します。対象ファイル: {}", filename);
     let mut path = get_adjacent_path(&app, "sessions");
     path.push(&filename);
-    
-    let content = fs::read_to_string(&path).map_err(|e| {
-        log::error!("セッションファイルの読み込みに失敗しました ({:?}): {}", path, e);
-        e.to_string()
-    })?;
-
-    let session: BingoSession = serde_json::from_str(&content).map_err(|e| {
-        log::error!("セッションデータの解析に失敗しました: {}", e);
-        e.to_string()
-    })?;
-    
+    let content = fs::read_to_string(&path).map_err(|e| { log::error!("読み込み失敗: {}", e); e.to_string() })?;
+    let session: BingoSession = serde_json::from_str(&content).map_err(|e| { log::error!("解析失敗: {}", e); e.to_string() })?;
     info!("セッションの復元に成功しました。ヒット番号: {:?}", session.hits);
     Ok(session.hits)
 }
 
 #[tauri::command]
 fn exit_app(app: AppHandle) {
-    info!("ユーザーによるアプリケーション終了リクエストを受信しました。");
+    info!("アプリケーションを終了します。");
     app.exit(0);
 }
 
@@ -177,6 +159,8 @@ fn exit_app(app: AppHandle) {
 
 fn main() {
     let base_dir = get_base_dir();
+    let log_dir = base_dir.join("logs"); // ログディレクトリの定義
+    
     let session_id = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     let log_filename = format!("session_{}", session_id);
 
@@ -193,24 +177,34 @@ fn main() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init());
 
+    builder = builder.on_window_event(|window, event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            // 設定画面（label: "main"）が閉じられようとした場合のみ、阻止して隠す
+            if window.label() == "main" {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        }
+    });
+
     // ロギング設定の構築
     let mut log_builder = tauri_plugin_log::Builder::new()
-        // ★ タイムゾーンをローカル（日本時間）に設定
-        .timezone(tauri_plugin_log::TimezoneStrategy::Local)
+        // タイムゾーン設定（最新のAPI形式）
+        .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
         .targets([
             Target::new(TargetKind::Stdout),
             Target::new(TargetKind::Webview),
         ]);
 
     if has_write_permission {
-        // 【修正】LogDir ではなく Folder(PathBuf) を使用して場所を強制指定する
-        // これにより、exe横の logs フォルダの中に書き込まれるようになります
-        log_builder = log_builder.target(Target::new(TargetKind::Folder(log_dir.clone())));
+        // 【修正】Folder ターゲットの型不整合を解消
+        log_builder = log_builder.target(Target::new(TargetKind::Folder { 
+            path: log_dir.clone(), 
+            // String 型を Some() で包んで Option<String> に変換
+            file_name: Some(log_filename.clone()) 
+        }));
     }
 
-    // 注意: Folder ターゲットの場合、ファイル名はプラグインが自動生成（日付等）するか、
-    // rotation_strategy に依存します。ファイル名を固定したい場合は、
-    // 以下の通り設定を調整します。
     builder = builder.plugin(log_builder.build());
 
     builder
@@ -228,7 +222,7 @@ fn main() {
                 return Err("Permission denied".into());
             }
 
-            let log_dir = base_dir.join("logs");
+            // ログディレクトリの準備
             if !log_dir.exists() { 
                 let _ = fs::create_dir_all(&log_dir); 
             }
