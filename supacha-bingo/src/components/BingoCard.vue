@@ -22,6 +22,8 @@ const isSpinning = ref(false);
 const rouletteNumber = ref<number | null>(null);
 const showBorder = ref(false);
 let spinAudio: HTMLAudioElement | null = null;
+const targetNum = ref<number | null>(null);
+let spinInterval: number | null = null; // setIntervalの管理用
 
 /** --- ウィンドウ操作ロジック --- */
 const appWindow = getCurrentWindow();
@@ -145,59 +147,87 @@ const playWinSound = () => {
     audio.play().catch(console.error);
 };
 
-const startRoulette = (final: number) => {
+const startSpinning = () => {
     if (isSpinning.value) return;
     isSpinning.value = true;
+
+    // 音声再生（既存の spinAudio ロジックをそのまま利用）
     if (gridPos.value.se_enabled) {
         if (!spinAudio) {
             spinAudio = new Audio(SE_SPIN_PATH);
             spinAudio.loop = true;
         }
-        // 設定からSE音量（0-100）を取得
         const baseVolume = gridPos.value.se_volume / 100;
-        // SPIN SE専用の減衰係数（例: 0.6倍にする）
-        const SPIN_GAIN_COEFFICIENT = 0.3;
-        // 音量を設定して再生（ループするのでcurrentTimeもリセット）
+        const SPIN_GAIN_COEFFICIENT = 1;
         spinAudio.currentTime = 0;
         spinAudio.volume = baseVolume * SPIN_GAIN_COEFFICIENT;
         spinAudio.play().catch(console.error);
     }
-    const interval = setInterval(() => {
+
+    // 高速シャッフル開始
+    spinInterval = window.setInterval(() => {
         rouletteNumber.value = Math.floor(Math.random() * 25) + 1;
     }, 60);
-    setTimeout(() => {
-        clearInterval(interval);
-        finishRoulette(final);
-    }, 1800);
 };
 
-const finishRoulette = (final: number) => {
+// 【追加】ストップが押された時の確定処理
+const stopSpinning = () => {
+    if (spinInterval) {
+        clearInterval(spinInterval);
+        spinInterval = null;
+    }
+
     isSpinning.value = false;
-    rouletteNumber.value = final;
     if (spinAudio) spinAudio.pause();
+
+    // 予約されていた番号をセット
+    const final = targetNum.value || 0;
+    rouletteNumber.value = final;
+
+    // 既存の確定演出
     if (!hitNumbers.value.includes(final)) hitNumbers.value.push(final);
     playWinSound();
     speakNumber(final);
     confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
-    emit('bingo-animation-finished', { number: final });
+
+    // 1秒後にControlPanel側へ「完了」を通知（保存処理などを走らせるため）
+    setTimeout(() => {
+        emit('bingo-animation-finished', { number: final });
+    }, 1000);
 };
 
 /** --- ライフサイクル --- */
-let unlistenUpdate: any, unlistenEdit: any, unlistenHit: any, unlistenReset: any, unlistenSync: any;
+let unlistenUpdate: any, unlistenEdit: any, unlistenHit: any, unlistenReset: any, unlistenSync: any, unlistenStop: any;
 
 onMounted(async () => {
+    // 起動時に自分でも設定ファイルから設定値を読み込む
+    try {
+        const saved = await invoke<any>('load_settings');
+        gridPos.value = { ...gridPos.value, ...saved };
+    } catch (e) { console.error(e); }
+
+    // イベントリスナーの登録
     unlistenUpdate = await listen<any>('grid-update', (e) => { gridPos.value = e.payload; });
     unlistenEdit = await listen<boolean>('edit-mode-update', (e) => { showBorder.value = e.payload; });
-    unlistenHit = await listen<{ number: number }>('bingo-hit', (e) => { startRoulette(e.payload.number); });
+    //unlistenHit = await listen<{ number: number }>('bingo-hit', (e) => { startRoulette(e.payload.number); });
     unlistenReset = await listen('bingo-reset', () => { hitNumbers.value = []; rouletteNumber.value = null; });
     unlistenSync = await listen<{ hits: number[] }>('bingo-sync-hits', (e) => {
         hitNumbers.value = e.payload.hits;
         rouletteNumber.value = null;
     });
+    // 抽選開始の指示を受け取る
+    unlistenHit = await listen<{ number: number }>('bingo-spin-start', () => {
+        startSpinning();
+    });
+    // 停止指示を受け取る (停止時に当選番号を受け取る)
+    unlistenStop = await listen<{ number: number }>('bingo-spin-stop', (e) => {
+        targetNum.value = e.payload.number;
+        stopSpinning();
+    });
 });
 
 onUnmounted(() => {
-    [unlistenUpdate, unlistenEdit, unlistenHit, unlistenReset, unlistenSync].forEach(u => u && u());
+    [unlistenUpdate, unlistenEdit, unlistenHit, unlistenReset, unlistenSync, unlistenStop].forEach(u => u && u());
     if (spinAudio) { spinAudio.pause(); spinAudio = null; }
 });
 </script>
@@ -268,7 +298,7 @@ onUnmounted(() => {
 
 .lottery-display-area {
     position: absolute;
-    top: 5%;
+    top: 4%;
     left: 50%;
     transform: translateX(-50%);
     width: 80px;
@@ -280,6 +310,12 @@ onUnmounted(() => {
     border-radius: 8px;
     z-index: 100;
     pointer-events: none;
+    /* 指定の背景色に変更 */
+    background: #13284B;
+    /* 数字の色に合わせた枠線を追加 */
+    border: 2px solid #F4B966;
+    /* わずかに透過させるとカードに馴染みます */
+    opacity: 0.9;
 }
 
 .roulette-number {
@@ -289,6 +325,10 @@ onUnmounted(() => {
     color: #f1c40f;
     font-weight: bold;
     text-shadow: 2px 2px 0 #000;
+    /* 指定の文字色に変更 */
+    color: #F4B966;
+    /* シンプルな配色にするため影は削除か、同系色に */
+    text-shadow: none;
 }
 
 .grid-layer {

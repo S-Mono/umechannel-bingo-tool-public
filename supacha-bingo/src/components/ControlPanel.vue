@@ -108,17 +108,32 @@ const getSecureRandomInt = (max: number): number => {
     return val % max;
 };
 
+const isSpinning = ref(false); // ルーレット回転中フラグ
 const spin = () => {
-    if (!isLive.value || isAnimating.value) return;
-    const available = Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
-    if (available.length === 0) return modal.value?.show("番号はすべて選出しました！", "alert");
+    // 閲覧モード中、または演出中（かつ回転中でない）は操作不能
+    if (!isLive.value || (isAnimating.value && !isSpinning.value)) return;
 
-    const randomIndex = getSecureRandomInt(available.length);
-    const num = available[randomIndex];
+    if (!isSpinning.value) {
+        // --- [フェーズ1] 抽選開始（回転アニメーション スタート） ---
+        isSpinning.value = true;
+        // BingoCardに「回転開始」を通知し、確定させる番号を予約する
+        emit('bingo-spin-start', {});
 
-    redoStack.value = [];
-    isAnimating.value = true;
-    emit('bingo-hit', { number: num });
+    } else {
+        // --- [フェーズ2] ストップ押下（回転アニメーション ストップ＆番号確定） ---
+        const available = Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
+        if (available.length === 0) return modal.value?.show("番号はすべて選出しました！", "alert");
+
+        redoStack.value = [];
+        // この時点で裏側では番号を確定させる（ガチ選出）
+        const randomIndex = getSecureRandomInt(available.length);
+        const num = available[randomIndex];
+
+        isSpinning.value = false;
+        isAnimating.value = true; // 確定演出が終わるまでボタンをロック
+        // BingoCardに「回転を止めて確定させろ」と通知
+        emit('bingo-spin-stop', { number: num });
+    }
 };
 
 const undo = async () => {
@@ -185,9 +200,11 @@ const cancelEdit = () => {
         </section>
 
         <section class="main-mgr">
-            <button class="spin-btn" :disabled="!isLive || isAnimating" @click="spin">
+            <button class="spin-btn" :disabled="!isLive || (isAnimating && !isSpinning)" @click="spin">
                 <template v-if="!isLive">⚠️ 閲覧モード</template>
-                <template v-else>{{ isAnimating ? '抽選中...' : '！抽選開始！' }}</template>
+                <template v-else>
+                    {{ isSpinning ? '！！ ストップ ！！' : (isAnimating ? '確定演出中...' : '！抽選開始！') }}
+                </template>
             </button>
             <div class="step-actions">
                 <button :disabled="!isLive || hitHistory.length === 0" @click="undo"
