@@ -496,6 +496,7 @@ section {
 
 /* スライダー */
 .custom-slider {
+    appearance: none;
     -webkit-appearance: none;
     width: 100%;
     height: 6px;
@@ -509,6 +510,7 @@ section {
 }
 
 .custom-slider::-webkit-slider-thumb {
+    appearance: none;
     -webkit-appearance: none;
     width: 18px;
     height: 18px;
