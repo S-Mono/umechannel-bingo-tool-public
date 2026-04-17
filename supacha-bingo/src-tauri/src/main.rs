@@ -12,6 +12,8 @@ use tauri_plugin_log::{Target, TargetKind};
 const DEFAULT_NORMAL_BINGO_VIDEO_PATH: &str = "effects/normal_bingo.mp4";
 const DEFAULT_SPECIAL_1_VIDEO_PATH: &str = "effects/special_1.mp4";
 const DEFAULT_SPECIAL_25_VIDEO_PATH: &str = "effects/special_25.mp4";
+const MAIN_WINDOW_DEFAULT_WIDTH: u32 = 450;
+const MAIN_WINDOW_DEFAULT_HEIGHT: u32 = 650;
 
 // --- データ構造体 ---
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -20,6 +22,8 @@ pub struct BingoConfig {
     pub x: f64, pub y: f64, pub w: f64, pub h: f64, pub hit_scale: f64,
     pub se_enabled: bool, pub se_volume: f64,
     pub tts_enabled: bool, pub tts_volume: f64, pub tts_repeat_count: i32,
+    pub main_window_x: Option<i32>,
+    pub main_window_y: Option<i32>,
     pub effect_enabled: bool,
     pub effect_monitor_id: String,
     pub normal_bingo_effect_enabled: bool,
@@ -43,6 +47,8 @@ impl Default for BingoConfig {
             tts_enabled: true,
             tts_volume: 50.0,
             tts_repeat_count: 1,
+            main_window_x: None,
+            main_window_y: None,
             effect_enabled: true,
             effect_monitor_id: String::new(),
             normal_bingo_effect_enabled: true,
@@ -203,6 +209,103 @@ fn load_or_initialize_config(app: &AppHandle) -> Result<(BingoConfig, bool), Str
 fn find_monitor(app: &AppHandle, monitor_id: &str) -> Result<Option<tauri::Monitor>, String> {
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
     Ok(monitors.into_iter().find(|monitor| build_monitor_id(monitor) == monitor_id))
+}
+
+fn monitor_contains_point(monitor: &tauri::Monitor, x: i32, y: i32) -> bool {
+    let monitor_x = monitor.position().x;
+    let monitor_y = monitor.position().y;
+    let monitor_right = monitor_x + monitor.size().width as i32;
+    let monitor_bottom = monitor_y + monitor.size().height as i32;
+
+    x >= monitor_x && x < monitor_right && y >= monitor_y && y < monitor_bottom
+}
+
+fn clamp_window_position_to_monitor(
+    monitor: &tauri::Monitor,
+    desired_x: i32,
+    desired_y: i32,
+    window_width: u32,
+    window_height: u32,
+) -> PhysicalPosition<i32> {
+    let monitor_x = monitor.position().x;
+    let monitor_y = monitor.position().y;
+    let max_x = (monitor_x + monitor.size().width as i32 - window_width as i32).max(monitor_x);
+    let max_y = (monitor_y + monitor.size().height as i32 - window_height as i32).max(monitor_y);
+
+    PhysicalPosition::new(desired_x.clamp(monitor_x, max_x), desired_y.clamp(monitor_y, max_y))
+}
+
+fn resolve_main_window_position(
+    app: &AppHandle,
+    config: &BingoConfig,
+    window_width: u32,
+    window_height: u32,
+) -> Result<Option<PhysicalPosition<i32>>, String> {
+    let (Some(saved_x), Some(saved_y)) = (config.main_window_x, config.main_window_y) else {
+        return Ok(None);
+    };
+
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    if monitors.is_empty() {
+        return Ok(Some(PhysicalPosition::new(saved_x, saved_y)));
+    }
+
+    let primary_monitor_id = app
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .map(|monitor| build_monitor_id(&monitor));
+
+    let target_monitor = monitors
+        .iter()
+        .find(|monitor| monitor_contains_point(monitor, saved_x, saved_y))
+        .or_else(|| {
+            primary_monitor_id
+                .as_ref()
+                .and_then(|primary_id| monitors.iter().find(|monitor| build_monitor_id(monitor) == *primary_id))
+        })
+        .or_else(|| monitors.first());
+
+    let Some(target_monitor) = target_monitor else {
+        return Ok(Some(PhysicalPosition::new(saved_x, saved_y)));
+    };
+
+    Ok(Some(clamp_window_position_to_monitor(
+        target_monitor,
+        saved_x,
+        saved_y,
+        window_width,
+        window_height,
+    )))
+}
+
+fn save_main_window_position(app: &AppHandle, x: i32, y: i32) -> Result<(), String> {
+    let path = get_config_path(app);
+    let (mut config, _) = load_or_initialize_config(app)?;
+
+    if config.main_window_x == Some(x) && config.main_window_y == Some(y) {
+        return Ok(());
+    }
+
+    config.main_window_x = Some(x);
+    config.main_window_y = Some(y);
+    save_config_file(&path, &config)
+}
+
+fn persist_main_window_position(window: &tauri::Window) {
+    if window.label() != "main" {
+        return;
+    }
+
+    match window.outer_position() {
+        Ok(position) => {
+            if let Err(error) = save_main_window_position(&window.app_handle(), position.x, position.y) {
+                log::warn!("メインウィンドウ位置の保存に失敗しました: {}", error);
+            }
+        }
+        Err(error) => {
+            log::warn!("メインウィンドウ位置の取得に失敗しました: {}", error);
+        }
+    }
 }
 
 fn resolve_effect_video_path(config: &BingoConfig, effect_type: &EffectType, require_enabled: bool) -> Option<PathBuf> {
@@ -516,12 +619,22 @@ fn main() {
         .plugin(tauri_plugin_dialog::init());
 
     builder = builder.on_window_event(|window, event| {
-        if let WindowEvent::CloseRequested { api, .. } = event {
-            // メイン設定画面と effect 画面は閉じずに隠す
-            if window.label() == "main" || window.label() == "effect" {
-                api.prevent_close();
-                let _ = window.hide();
+        match event {
+            WindowEvent::Moved(_) => {
+                persist_main_window_position(window);
             }
+            WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == "main" {
+                    persist_main_window_position(window);
+                }
+
+                // メイン設定画面と effect 画面は閉じずに隠す
+                if window.label() == "main" || window.label() == "effect" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+            _ => {}
         }
     });
 
@@ -573,6 +686,22 @@ fn main() {
                     for i in 0..delete_count { 
                         let _ = fs::remove_file(log_files[i].path()); 
                     }
+                }
+            }
+
+            let (config, _) = load_or_initialize_config(&app_handle)?;
+            if let Some(main_window) = app.get_webview_window("main") {
+                let window_size = main_window
+                    .outer_size()
+                    .unwrap_or(PhysicalSize::new(MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_DEFAULT_HEIGHT));
+
+                if let Some(position) = resolve_main_window_position(
+                    &app_handle,
+                    &config,
+                    window_size.width,
+                    window_size.height,
+                )? {
+                    main_window.set_position(position).map_err(|e| e.to_string())?;
                 }
             }
 
