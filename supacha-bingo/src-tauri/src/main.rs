@@ -69,10 +69,12 @@ struct MonitorInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum EffectType {
+    #[serde(rename = "NORMAL_BINGO")]
     NormalBingo,
+    #[serde(rename = "SPECIAL_1", alias = "SPECIAL1")]
     Special1,
+    #[serde(rename = "SPECIAL_25", alias = "SPECIAL25")]
     Special25,
 }
 
@@ -258,6 +260,40 @@ fn resolve_target_monitor(app: &AppHandle, config: &BingoConfig) -> Result<tauri
     }
 }
 
+fn sync_effect_window_state(app: &AppHandle, config: &BingoConfig, visible: bool) -> Result<(), String> {
+    let effect_window = app
+        .get_webview_window("effect")
+        .ok_or_else(|| "effect ウィンドウが見つかりません。".to_string())?;
+
+    let target_monitor = resolve_target_monitor(app, config)?;
+
+    effect_window
+        .set_ignore_cursor_events(true)
+        .map_err(|e| e.to_string())?;
+
+    if !visible {
+        let _ = effect_window.set_fullscreen(false);
+        effect_window.hide().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let _ = effect_window.set_fullscreen(false);
+    effect_window
+        .set_position(PhysicalPosition::new(target_monitor.position().x, target_monitor.position().y))
+        .map_err(|e| e.to_string())?;
+    effect_window
+        .set_size(Size::Physical(PhysicalSize::new(
+            target_monitor.size().width,
+            target_monitor.size().height,
+        )))
+        .map_err(|e| e.to_string())?;
+
+    effect_window.show().map_err(|e| e.to_string())?;
+    effect_window.set_fullscreen(true).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 fn play_effect_with_config(
     app: &AppHandle,
     config: &BingoConfig,
@@ -274,24 +310,7 @@ fn play_effect_with_config(
         return Ok(false);
     };
 
-    let effect_window = app
-        .get_webview_window("effect")
-        .ok_or_else(|| "effect ウィンドウが見つかりません。".to_string())?;
-
-    let target_monitor = resolve_target_monitor(app, config)?;
-
-    let _ = effect_window.set_fullscreen(false);
-    effect_window
-        .set_position(PhysicalPosition::new(target_monitor.position().x, target_monitor.position().y))
-        .map_err(|e| e.to_string())?;
-    effect_window.show().map_err(|e| e.to_string())?;
-    effect_window
-        .set_size(Size::Physical(PhysicalSize::new(
-            target_monitor.size().width,
-            target_monitor.size().height,
-        )))
-        .map_err(|e| e.to_string())?;
-    effect_window.set_fullscreen(true).map_err(|e| e.to_string())?;
+    sync_effect_window_state(app, config, true)?;
 
     let payload = EffectPayload {
         effect_type,
@@ -302,6 +321,11 @@ fn play_effect_with_config(
         .map_err(|e| e.to_string())?;
 
     Ok(true)
+}
+
+#[tauri::command]
+fn sync_effect_window(app: AppHandle, config: BingoConfig, visible: bool) -> Result<(), String> {
+    sync_effect_window_state(&app, &config, visible)
 }
 
 // --- Tauri コマンドの実装 ---
@@ -445,10 +469,21 @@ fn preview_bingo_effect(app: AppHandle, config: BingoConfig, effect_type: Effect
 #[tauri::command]
 fn hide_effect_window(app: AppHandle) -> Result<(), String> {
     if let Some(effect_window) = app.get_webview_window("effect") {
+        let _ = effect_window.set_ignore_cursor_events(true);
         let _ = effect_window.set_fullscreen(false);
         effect_window.hide().map_err(|e| e.to_string())?;
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+fn show_effect_window(app: AppHandle) -> Result<(), String> {
+    let effect_window = app
+        .get_webview_window("effect")
+        .ok_or_else(|| "effect ウィンドウが見つかりません。".to_string())?;
+
+    effect_window.show().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -551,8 +586,10 @@ fn main() {
             get_sessions,
             load_session,
             list_effect_monitors,
+            sync_effect_window,
             play_bingo_effect,
             preview_bingo_effect,
+            show_effect_window,
             hide_effect_window,
             exit_app,
             log_action

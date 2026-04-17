@@ -122,10 +122,14 @@ watch(showMenu, (newVal) => {
     }
 });
 
+const cleanupGlobalMenuListeners = () => {
+    window.removeEventListener('mousedown', handleGlobalEvents);
+    window.removeEventListener('keydown', handleGlobalEvents);
+};
+
 // コンポーネントが消える時にリスナーを確実に掃除（メモリリーク防止）
 onUnmounted(() => {
-    window.removeEventListener('click', handleGlobalEvents);
-    window.removeEventListener('keydown', handleGlobalEvents);
+    cleanupGlobalMenuListeners();
 });
 
 /** --- 演出ロジック --- */
@@ -228,6 +232,12 @@ onMounted(async () => {
 
 onUnmounted(() => {
     [unlistenUpdate, unlistenEdit, unlistenHit, unlistenReset, unlistenSync, unlistenStop].forEach(u => u && u());
+    cleanupGlobalMenuListeners();
+    if (spinInterval) {
+        clearInterval(spinInterval);
+        spinInterval = null;
+    }
+    window.speechSynthesis.cancel();
     if (spinAudio) { spinAudio.pause(); spinAudio = null; }
 });
 </script>

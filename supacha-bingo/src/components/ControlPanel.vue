@@ -29,6 +29,14 @@ interface EffectMonitor {
 
 type EffectType = 'NORMAL_BINGO' | 'SPECIAL_1' | 'SPECIAL_25';
 
+interface EffectPlaybackStartedPayload {
+    effectType: EffectType;
+}
+
+interface EffectPlaybackStoppedPayload {
+    effectType: EffectType | null;
+}
+
 const grid = ref<GridConfig>({
     x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
     se_enabled: true, se_volume: 50, tts_enabled: true, tts_volume: 50, tts_repeat_count: 1,
@@ -53,18 +61,48 @@ const sessionFiles = ref<string[]>([]);
 const effectMonitors = ref<EffectMonitor[]>([]);
 const bingoLineKeys = ref<string[]>([]);
 const previewingEffectType = ref<EffectType | null>(null);
+const isEffectPlaying = ref(false);
 let settingsSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
 let unlistenAnimationFinished: (() => void) | null = null;
+let unlistenEffectPlaybackStarted: (() => void) | null = null;
+let unlistenEffectPlaybackStopped: (() => void) | null = null;
+
+const cloneGridConfig = (config: GridConfig): GridConfig => ({ ...config });
+
+const getCurrentConfig = (): GridConfig => cloneGridConfig(tempGrid.value);
+
+const commitCurrentConfig = (): GridConfig => {
+    const nextConfig = getCurrentConfig();
+    grid.value = nextConfig;
+    return nextConfig;
+};
+
+const saveCurrentSettings = async () => {
+    const nextConfig = commitCurrentConfig();
+    await invoke('save_settings', { config: nextConfig });
+};
 
 /** --- 2. ライフサイクル --- */
 onMounted(async () => {
     try {
         const saved = await invoke<any>('load_settings');
         grid.value = { ...grid.value, ...saved };
-        tempGrid.value = { ...grid.value };
-        emit('grid-update', grid.value);
+        tempGrid.value = cloneGridConfig(grid.value);
+        emit('grid-update', cloneGridConfig(grid.value));
         await refreshSessionList();
         await refreshEffectMonitors();
+        await syncEffectWindow(false, grid.value);
+
+        unlistenEffectPlaybackStarted = await listen<EffectPlaybackStartedPayload>('effect-playback-started', () => {
+            isEffectPlaying.value = true;
+        });
+
+        unlistenEffectPlaybackStopped = await listen<EffectPlaybackStoppedPayload>('effect-playback-stopped', (event) => {
+            isEffectPlaying.value = false;
+            if (!event.payload.effectType || previewingEffectType.value === event.payload.effectType) {
+                previewingEffectType.value = null;
+            }
+        });
 
         unlistenAnimationFinished = await listen<{ number: number }>('bingo-animation-finished', async (event) => {
             if (!isLive.value) return;
@@ -96,6 +134,16 @@ onUnmounted(() => {
         unlistenAnimationFinished();
         unlistenAnimationFinished = null;
     }
+
+    if (unlistenEffectPlaybackStarted) {
+        unlistenEffectPlaybackStarted();
+        unlistenEffectPlaybackStarted = null;
+    }
+
+    if (unlistenEffectPlaybackStopped) {
+        unlistenEffectPlaybackStopped();
+        unlistenEffectPlaybackStopped = null;
+    }
 });
 
 const refreshSessionList = async () => {
@@ -104,6 +152,23 @@ const refreshSessionList = async () => {
 
 const refreshEffectMonitors = async () => {
     effectMonitors.value = await invoke<EffectMonitor[]>('list_effect_monitors');
+};
+
+const syncEffectWindow = async (visible = false, config: GridConfig = getCurrentConfig()) => {
+    try {
+        await invoke('sync_effect_window', { config, visible });
+    } catch (error) {
+        console.error('Effect Window Sync Error:', error);
+    }
+};
+
+const setEffectMonitorHighlight = async (active: boolean) => {
+    if (isEffectPlaying.value) {
+        return;
+    }
+
+    await syncEffectWindow(active);
+    emit('effect-monitor-highlight', { active });
 };
 
 const syncBingoLines = (hits: number[]) => {
@@ -118,9 +183,8 @@ const scheduleSettingsSave = () => {
     }
 
     settingsSaveTimer = window.setTimeout(async () => {
-        grid.value = { ...tempGrid.value };
         try {
-            await invoke('save_settings', { config: grid.value });
+            await saveCurrentSettings();
         } catch (error) {
             console.error('Settings Auto Save Error:', error);
         } finally {
@@ -130,7 +194,7 @@ const scheduleSettingsSave = () => {
 };
 
 const playBingoEffect = async (lastNumber: number) => {
-    const currentConfig = tempGrid.value;
+    const currentConfig = getCurrentConfig();
     if (!currentConfig.effect_enabled) return;
 
     let effectType: EffectType = 'NORMAL_BINGO';
@@ -153,15 +217,23 @@ const previewEffect = async (effectType: EffectType) => {
     previewingEffectType.value = effectType;
 
     try {
-        const played = await invoke<boolean>('preview_bingo_effect', { config: tempGrid.value, effectType });
+        const played = await invoke<boolean>('preview_bingo_effect', { config: getCurrentConfig(), effectType });
         if (!played) {
+            previewingEffectType.value = null;
             await modal.value?.show('プレビューする動画が見つかりませんでした。\n動画の場所を確認してください。', 'alert');
         }
     } catch (error) {
+        previewingEffectType.value = null;
         console.error('Effect Preview Error:', error);
         await modal.value?.show('プレビュー再生に失敗しました。\n設定した画面や動画の場所を確認してください。', 'alert');
-    } finally {
-        previewingEffectType.value = null;
+    }
+};
+
+const stopPreviewEffect = async () => {
+    try {
+        await emit('stop-effect-playback', {});
+    } catch (error) {
+        console.error('Effect Preview Stop Error:', error);
     }
 };
 
@@ -288,6 +360,9 @@ watch(tempGrid, (val) => {
     emit('grid-update', { ...val });
     scheduleSettingsSave();
 }, { deep: true });
+watch(() => [tempGrid.value.effect_enabled, tempGrid.value.effect_monitor_id], () => {
+    syncEffectWindow(false);
+});
 watch(isEditing, (val) => { emit('edit-mode-update', val); });
 
 const startEdit = () => { isEditing.value = true; };
@@ -297,8 +372,7 @@ const confirmEdit = async () => {
         settingsSaveTimer = null;
     }
 
-    grid.value = { ...tempGrid.value };
-    await invoke('save_settings', { config: grid.value });
+    await saveCurrentSettings();
     isEditing.value = false;
 };
 const cancelEdit = () => {
@@ -307,9 +381,9 @@ const cancelEdit = () => {
         settingsSaveTimer = null;
     }
 
-    tempGrid.value = { ...grid.value };
+    tempGrid.value = cloneGridConfig(grid.value);
     isEditing.value = false;
-    emit('grid-update', grid.value);
+    emit('grid-update', cloneGridConfig(grid.value));
 };
 </script>
 
@@ -408,10 +482,12 @@ const cancelEdit = () => {
                         </div>
                     </div>
 
-                    <div class="setting-item">
+                    <div class="setting-item"
+                        @mouseenter="setEffectMonitorHighlight(true)"
+                        @mouseleave="setEffectMonitorHighlight(false)">
                         <label class="item-label">再生モニタ</label>
                         <select v-model="tempGrid.effect_monitor_id" class="select-input"
-                            :disabled="!tempGrid.effect_enabled">
+                            :disabled="!tempGrid.effect_enabled || isEffectPlaying">
                             <option value="">プライマリモニタ（自動）</option>
                             <option v-for="monitor in effectMonitors" :key="monitor.id" :value="monitor.id">
                                 {{ monitor.label }}
@@ -433,9 +509,9 @@ const cancelEdit = () => {
                                 :disabled="!tempGrid.effect_enabled || !tempGrid.normal_bingo_effect_enabled"
                                 placeholder="effects/normal_bingo.mp4">
                             <button class="preview-btn"
-                                :disabled="previewingEffectType !== null"
-                                @click="previewEffect('NORMAL_BINGO')">
-                                {{ previewingEffectType === 'NORMAL_BINGO' ? '再生中...' : 'プレビュー' }}
+                                :disabled="previewingEffectType !== null && previewingEffectType !== 'NORMAL_BINGO'"
+                                @click="previewingEffectType === 'NORMAL_BINGO' ? stopPreviewEffect() : previewEffect('NORMAL_BINGO')">
+                                {{ previewingEffectType === 'NORMAL_BINGO' ? '停止' : 'プレビュー' }}
                             </button>
                         </div>
                     </div>
@@ -454,9 +530,9 @@ const cancelEdit = () => {
                                 :disabled="!tempGrid.effect_enabled || !tempGrid.special_1_effect_enabled"
                                 placeholder="effects/special_1.mp4">
                             <button class="preview-btn"
-                                :disabled="previewingEffectType !== null"
-                                @click="previewEffect('SPECIAL_1')">
-                                {{ previewingEffectType === 'SPECIAL_1' ? '再生中...' : 'プレビュー' }}
+                                :disabled="previewingEffectType !== null && previewingEffectType !== 'SPECIAL_1'"
+                                @click="previewingEffectType === 'SPECIAL_1' ? stopPreviewEffect() : previewEffect('SPECIAL_1')">
+                                {{ previewingEffectType === 'SPECIAL_1' ? '停止' : 'プレビュー' }}
                             </button>
                         </div>
                     </div>
@@ -475,9 +551,9 @@ const cancelEdit = () => {
                                 :disabled="!tempGrid.effect_enabled || !tempGrid.special_25_effect_enabled"
                                 placeholder="effects/special_25.mp4">
                             <button class="preview-btn"
-                                :disabled="previewingEffectType !== null"
-                                @click="previewEffect('SPECIAL_25')">
-                                {{ previewingEffectType === 'SPECIAL_25' ? '再生中...' : 'プレビュー' }}
+                                :disabled="previewingEffectType !== null && previewingEffectType !== 'SPECIAL_25'"
+                                @click="previewingEffectType === 'SPECIAL_25' ? stopPreviewEffect() : previewEffect('SPECIAL_25')">
+                                {{ previewingEffectType === 'SPECIAL_25' ? '停止' : 'プレビュー' }}
                             </button>
                         </div>
                     </div>
