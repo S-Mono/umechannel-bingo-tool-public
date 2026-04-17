@@ -313,7 +313,7 @@ onUnmounted(() => {
     /* 指定の背景色に変更 */
     background: #13284B;
     /* 数字の色に合わせた枠線を追加 */
-    border: 2px solid #F4B966;
+    /* border: 2px solid #F4B966; */
     /* わずかに透過させるとカードに馴染みます */
     opacity: 0.9;
 }

@@ -1,22 +1,45 @@
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import BingoModal from './BingoModal.vue';
+import { getCompletedBingoKeys, getNewBingoKeys } from '../utils/bingo';
 
 const modal = ref<InstanceType<typeof BingoModal> | null>(null);
 
 /** --- 1. 型定義と初期状態 --- */
 interface GridConfig {
-    [key: string]: any;
     x: number; y: number; w: number; h: number; hit_scale: number;
     se_enabled: boolean; se_volume: number;
     tts_enabled: boolean; tts_volume: number; tts_repeat_count: number;
+    effect_enabled: boolean;
+    effect_monitor_id: string;
+    normal_bingo_effect_enabled: boolean;
+    special_1_effect_enabled: boolean;
+    special_25_effect_enabled: boolean;
+    normal_bingo_video_path: string;
+    special_1_video_path: string;
+    special_25_video_path: string;
 }
+
+interface EffectMonitor {
+    id: string;
+    label: string;
+}
+
+type EffectType = 'NORMAL_BINGO' | 'SPECIAL_1' | 'SPECIAL_25';
 
 const grid = ref<GridConfig>({
     x: 22, y: 109, w: 237, h: 239, hit_scale: 100,
-    se_enabled: true, se_volume: 50, tts_enabled: true, tts_volume: 50, tts_repeat_count: 1
+    se_enabled: true, se_volume: 50, tts_enabled: true, tts_volume: 50, tts_repeat_count: 1,
+    effect_enabled: true,
+    effect_monitor_id: '',
+    normal_bingo_effect_enabled: true,
+    special_1_effect_enabled: false,
+    special_25_effect_enabled: false,
+    normal_bingo_video_path: 'effects/normal_bingo.mp4',
+    special_1_video_path: 'effects/special_1.mp4',
+    special_25_video_path: 'effects/special_25.mp4'
 });
 const tempGrid = ref<GridConfig>({ ...grid.value });
 const hitHistory = ref<number[]>([]);
@@ -27,6 +50,11 @@ const isAnimating = ref(false);
 const isToggleOpen = ref(false);
 const isEditing = ref(false);
 const sessionFiles = ref<string[]>([]);
+const effectMonitors = ref<EffectMonitor[]>([]);
+const bingoLineKeys = ref<string[]>([]);
+const previewingEffectType = ref<EffectType | null>(null);
+let settingsSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
+let unlistenAnimationFinished: (() => void) | null = null;
 
 /** --- 2. ライフサイクル --- */
 onMounted(async () => {
@@ -36,20 +64,105 @@ onMounted(async () => {
         tempGrid.value = { ...grid.value };
         emit('grid-update', grid.value);
         await refreshSessionList();
+        await refreshEffectMonitors();
 
-        await listen<{ number: number }>('bingo-animation-finished', async (event) => {
+        unlistenAnimationFinished = await listen<{ number: number }>('bingo-animation-finished', async (event) => {
             if (!isLive.value) return;
+
             if (!hitHistory.value.includes(event.payload.number)) {
-                hitHistory.value.push(event.payload.number);
+                hitHistory.value = [...hitHistory.value, event.payload.number];
             }
+
+            const newBingoKeys = getNewBingoKeys(bingoLineKeys.value, hitHistory.value);
+            bingoLineKeys.value = getCompletedBingoKeys(hitHistory.value);
             isAnimating.value = false;
+
+            if (newBingoKeys.length > 0) {
+                await playBingoEffect(event.payload.number);
+            }
+
             await persistHits('HIT');
         });
     } catch (e) { console.error("Initialize Error:", e); }
 });
 
+onUnmounted(() => {
+    if (settingsSaveTimer) {
+        window.clearTimeout(settingsSaveTimer);
+        settingsSaveTimer = null;
+    }
+
+    if (unlistenAnimationFinished) {
+        unlistenAnimationFinished();
+        unlistenAnimationFinished = null;
+    }
+});
+
 const refreshSessionList = async () => {
     sessionFiles.value = await invoke<string[]>('get_sessions');
+};
+
+const refreshEffectMonitors = async () => {
+    effectMonitors.value = await invoke<EffectMonitor[]>('list_effect_monitors');
+};
+
+const syncBingoLines = (hits: number[]) => {
+    bingoLineKeys.value = getCompletedBingoKeys(hits);
+};
+
+const scheduleSettingsSave = () => {
+    if (isEditing.value) return;
+
+    if (settingsSaveTimer) {
+        window.clearTimeout(settingsSaveTimer);
+    }
+
+    settingsSaveTimer = window.setTimeout(async () => {
+        grid.value = { ...tempGrid.value };
+        try {
+            await invoke('save_settings', { config: grid.value });
+        } catch (error) {
+            console.error('Settings Auto Save Error:', error);
+        } finally {
+            settingsSaveTimer = null;
+        }
+    }, 250);
+};
+
+const playBingoEffect = async (lastNumber: number) => {
+    const currentConfig = tempGrid.value;
+    if (!currentConfig.effect_enabled) return;
+
+    let effectType: EffectType = 'NORMAL_BINGO';
+    if (lastNumber === 1 && currentConfig.special_1_effect_enabled) {
+        effectType = 'SPECIAL_1';
+    } else if (lastNumber === 25 && currentConfig.special_25_effect_enabled) {
+        effectType = 'SPECIAL_25';
+    } else if (!currentConfig.normal_bingo_effect_enabled) {
+        return;
+    }
+
+    try {
+        await invoke('play_bingo_effect', { config: currentConfig, effectType });
+    } catch (error) {
+        console.error('Effect Playback Error:', error);
+    }
+};
+
+const previewEffect = async (effectType: EffectType) => {
+    previewingEffectType.value = effectType;
+
+    try {
+        const played = await invoke<boolean>('preview_bingo_effect', { config: tempGrid.value, effectType });
+        if (!played) {
+            await modal.value?.show('プレビューする動画が見つかりませんでした。\n動画の場所を確認してください。', 'alert');
+        }
+    } catch (error) {
+        console.error('Effect Preview Error:', error);
+        await modal.value?.show('プレビュー再生に失敗しました。\n設定した画面や動画の場所を確認してください。', 'alert');
+    } finally {
+        previewingEffectType.value = null;
+    }
 };
 
 /** --- 3. セッション管理 --- */
@@ -62,6 +175,7 @@ const startNewBingo = async () => {
     redoStack.value = [];
     currentFile.value = null;
     isLive.value = true;
+    bingoLineKeys.value = [];
     emit('bingo-reset', {});
 };
 
@@ -71,12 +185,14 @@ const previewSession = async (filename: string) => {
         hitHistory.value = [];
         redoStack.value = [];
         isLive.value = false;
+        bingoLineKeys.value = [];
         emit('bingo-reset', {});
         await invoke('log_action', { trigger: 'CLOSE', message: 'プレビュー終了' });
         return;
     }
     const hits = await invoke<number[]>('load_session', { filename });
     hitHistory.value = hits;
+    syncBingoLines(hits);
     currentFile.value = filename;
     isLive.value = false;
     emit('bingo-sync-hits', { hits: [...hits] });
@@ -140,6 +256,7 @@ const undo = async () => {
     if (!isLive.value || hitHistory.value.length === 0) return;
     const last = hitHistory.value.pop();
     if (last) redoStack.value.push(last);
+    syncBingoLines(hitHistory.value);
     emit('bingo-sync-hits', { hits: [...hitHistory.value] });
     await persistHits('UNDO');
 };
@@ -148,6 +265,7 @@ const redo = async () => {
     if (!isLive.value || redoStack.value.length === 0) return;
     const last = redoStack.value.pop();
     if (last) hitHistory.value.push(last);
+    syncBingoLines(hitHistory.value);
     emit('bingo-sync-hits', { hits: [...hitHistory.value] });
     await persistHits('REDO');
 };
@@ -159,22 +277,36 @@ const resetBingo = async () => {
         currentFile.value = null;
         redoStack.value = [];
         isLive.value = false;
+        bingoLineKeys.value = [];
         emit('bingo-reset', {});
         await invoke('log_action', { trigger: 'RESET', message: 'セッション初期化' });
     }
 };
 
 /** --- 5. 設定管理 --- */
-watch(tempGrid, (val) => { emit('grid-update', { ...val }); }, { deep: true });
+watch(tempGrid, (val) => {
+    emit('grid-update', { ...val });
+    scheduleSettingsSave();
+}, { deep: true });
 watch(isEditing, (val) => { emit('edit-mode-update', val); });
 
 const startEdit = () => { isEditing.value = true; };
 const confirmEdit = async () => {
+    if (settingsSaveTimer) {
+        window.clearTimeout(settingsSaveTimer);
+        settingsSaveTimer = null;
+    }
+
     grid.value = { ...tempGrid.value };
     await invoke('save_settings', { config: grid.value });
     isEditing.value = false;
 };
 const cancelEdit = () => {
+    if (settingsSaveTimer) {
+        window.clearTimeout(settingsSaveTimer);
+        settingsSaveTimer = null;
+    }
+
     tempGrid.value = { ...grid.value };
     isEditing.value = false;
     emit('grid-update', grid.value);
@@ -225,7 +357,7 @@ const cancelEdit = () => {
 
         <section class="settings-mgr">
             <div class="accordion-head" @click="isToggleOpen = !isToggleOpen">
-                <span>⚙️ 設定 (位置・音響)</span>
+                <span>⚙️ 設定 (位置・音響・演出)</span>
                 <span>{{ isToggleOpen ? '▲' : '▼' }}</span>
             </div>
 
@@ -261,6 +393,100 @@ const cancelEdit = () => {
                             <option v-for="i in 3" :key="i" :value="i">{{ i }}回</option>
                         </select>
                     </div>
+                </div>
+
+                <hr class="divider" />
+
+                <div class="effect-group">
+                    <div class="setting-item">
+                        <div class="setting-header">
+                            <label class="item-label">エフェクト再生</label>
+                            <button class="toggle-btn" :class="{ 'is-active': tempGrid.effect_enabled }"
+                                @click="tempGrid.effect_enabled = !tempGrid.effect_enabled">
+                                {{ tempGrid.effect_enabled ? 'ON' : 'OFF' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <label class="item-label">再生モニタ</label>
+                        <select v-model="tempGrid.effect_monitor_id" class="select-input"
+                            :disabled="!tempGrid.effect_enabled">
+                            <option value="">プライマリモニタ（自動）</option>
+                            <option v-for="monitor in effectMonitors" :key="monitor.id" :value="monitor.id">
+                                {{ monitor.label }}
+                            </option>
+                        </select>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-header">
+                            <label class="item-label">ビンゴ動画</label>
+                            <button class="toggle-btn" :class="{ 'is-active': tempGrid.normal_bingo_effect_enabled }"
+                                @click="tempGrid.normal_bingo_effect_enabled = !tempGrid.normal_bingo_effect_enabled"
+                                :disabled="!tempGrid.effect_enabled">
+                                {{ tempGrid.normal_bingo_effect_enabled ? 'ON' : 'OFF' }}
+                            </button>
+                        </div>
+                        <div class="path-row">
+                            <input v-model="tempGrid.normal_bingo_video_path" class="path-input"
+                                :disabled="!tempGrid.effect_enabled || !tempGrid.normal_bingo_effect_enabled"
+                                placeholder="effects/normal_bingo.mp4">
+                            <button class="preview-btn"
+                                :disabled="previewingEffectType !== null"
+                                @click="previewEffect('NORMAL_BINGO')">
+                                {{ previewingEffectType === 'NORMAL_BINGO' ? '再生中...' : 'プレビュー' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-header">
+                            <label class="item-label">1 用動画</label>
+                            <button class="toggle-btn" :class="{ 'is-active': tempGrid.special_1_effect_enabled }"
+                                @click="tempGrid.special_1_effect_enabled = !tempGrid.special_1_effect_enabled"
+                                :disabled="!tempGrid.effect_enabled">
+                                {{ tempGrid.special_1_effect_enabled ? 'ON' : 'OFF' }}
+                            </button>
+                        </div>
+                        <div class="path-row">
+                            <input v-model="tempGrid.special_1_video_path" class="path-input"
+                                :disabled="!tempGrid.effect_enabled || !tempGrid.special_1_effect_enabled"
+                                placeholder="effects/special_1.mp4">
+                            <button class="preview-btn"
+                                :disabled="previewingEffectType !== null"
+                                @click="previewEffect('SPECIAL_1')">
+                                {{ previewingEffectType === 'SPECIAL_1' ? '再生中...' : 'プレビュー' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div class="setting-header">
+                            <label class="item-label">25 用動画</label>
+                            <button class="toggle-btn" :class="{ 'is-active': tempGrid.special_25_effect_enabled }"
+                                @click="tempGrid.special_25_effect_enabled = !tempGrid.special_25_effect_enabled"
+                                :disabled="!tempGrid.effect_enabled">
+                                {{ tempGrid.special_25_effect_enabled ? 'ON' : 'OFF' }}
+                            </button>
+                        </div>
+                        <div class="path-row">
+                            <input v-model="tempGrid.special_25_video_path" class="path-input"
+                                :disabled="!tempGrid.effect_enabled || !tempGrid.special_25_effect_enabled"
+                                placeholder="effects/special_25.mp4">
+                            <button class="preview-btn"
+                                :disabled="previewingEffectType !== null"
+                                @click="previewEffect('SPECIAL_25')">
+                                {{ previewingEffectType === 'SPECIAL_25' ? '再生中...' : 'プレビュー' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <p class="setting-note">動画は 2 通りで指定できます。アプリ本体の近くに置く書き方か、PC 上の場所をそのまま書く方法です。</p>
+                    <p class="setting-note">例: effects/normal_bingo.mp4</p>
+                    <p class="setting-note">例: D:/StreamAssets/bingo/normal_bingo.mp4</p>
+                    <p class="setting-note">effects/ から始まる書き方は、spacha-bingo.exe と同じ場所を起点に探します。</p>
+                    <p class="setting-note">1 用や 25 用の動画が見つからないときは通常のビンゴ動画を使い、それも無いときは動画を流しません。</p>
                 </div>
 
                 <hr class="divider" />
@@ -436,6 +662,12 @@ section {
     gap: 5px;
 }
 
+.effect-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
 .setting-header {
     display: flex;
     justify-content: space-between;
@@ -509,6 +741,55 @@ section {
     outline: none;
     border-color: #3498db;
     box-shadow: 0 0 8px rgba(52, 152, 219, 0.4);
+}
+
+.select-input,
+.path-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: #2c3e50;
+    color: white;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 0.85rem;
+}
+
+.select-input:disabled,
+.path-input:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.path-row {
+    display: flex;
+    gap: 8px;
+}
+
+.preview-btn {
+    flex: 0 0 auto;
+    min-width: 88px;
+    padding: 8px 12px;
+    background: #16a085;
+    color: white;
+    border: 1px solid #1abc9c;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: bold;
+}
+
+.preview-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    filter: grayscale(1);
+}
+
+.setting-note {
+    margin: -4px 0 6px;
+    color: #95a5a6;
+    font-size: 0.75rem;
+    line-height: 1.4;
 }
 
 /* スライダー */

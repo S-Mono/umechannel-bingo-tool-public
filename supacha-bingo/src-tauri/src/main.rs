@@ -1,25 +1,86 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use log::info;
 use tauri_plugin_log::{Target, TargetKind};
 
+const DEFAULT_NORMAL_BINGO_VIDEO_PATH: &str = "effects/normal_bingo.mp4";
+const DEFAULT_SPECIAL_1_VIDEO_PATH: &str = "effects/special_1.mp4";
+const DEFAULT_SPECIAL_25_VIDEO_PATH: &str = "effects/special_25.mp4";
+
 // --- データ構造体 ---
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
 pub struct BingoConfig {
     pub x: f64, pub y: f64, pub w: f64, pub h: f64, pub hit_scale: f64,
     pub se_enabled: bool, pub se_volume: f64,
     pub tts_enabled: bool, pub tts_volume: f64, pub tts_repeat_count: i32,
+    pub effect_enabled: bool,
+    pub effect_monitor_id: String,
+    pub normal_bingo_effect_enabled: bool,
+    pub special_1_effect_enabled: bool,
+    pub special_25_effect_enabled: bool,
+    pub normal_bingo_video_path: String,
+    pub special_1_video_path: String,
+    pub special_25_video_path: String,
+}
+
+impl Default for BingoConfig {
+    fn default() -> Self {
+        Self {
+            x: 22.0,
+            y: 109.0,
+            w: 237.0,
+            h: 239.0,
+            hit_scale: 100.0,
+            se_enabled: true,
+            se_volume: 50.0,
+            tts_enabled: true,
+            tts_volume: 50.0,
+            tts_repeat_count: 1,
+            effect_enabled: true,
+            effect_monitor_id: String::new(),
+            normal_bingo_effect_enabled: true,
+            special_1_effect_enabled: false,
+            special_25_effect_enabled: false,
+            normal_bingo_video_path: DEFAULT_NORMAL_BINGO_VIDEO_PATH.to_string(),
+            special_1_video_path: DEFAULT_SPECIAL_1_VIDEO_PATH.to_string(),
+            special_25_video_path: DEFAULT_SPECIAL_25_VIDEO_PATH.to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BingoSession {
     pub timestamp: String,
     pub hits: Vec<i32>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct MonitorInfo {
+    id: String,
+    label: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum EffectType {
+    NormalBingo,
+    Special1,
+    Special25,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct EffectPayload {
+    effect_type: EffectType,
+    video_path: String,
 }
 
 // --- ヘルパー関数 ---
@@ -34,6 +95,215 @@ fn get_adjacent_path(_app: &AppHandle, sub_path: &str) -> PathBuf {
     get_base_dir().join(sub_path)
 }
 
+fn get_config_path(app: &AppHandle) -> PathBuf {
+    get_adjacent_path(app, "bingo_config.json")
+}
+
+fn build_monitor_id(monitor: &tauri::Monitor) -> String {
+    format!(
+        "{}__{}_{}__{}_{}__{:.2}",
+        monitor.name().cloned().unwrap_or_else(|| "monitor".to_string()),
+        monitor.position().x,
+        monitor.position().y,
+        monitor.size().width,
+        monitor.size().height,
+        monitor.scale_factor()
+    )
+}
+
+fn resolve_video_path(raw_path: &str) -> PathBuf {
+    let candidate = PathBuf::from(raw_path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        get_base_dir().join(candidate)
+    }
+}
+
+fn save_config_file(path: &PathBuf, config: &BingoConfig) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn merge_json_defaults(target: &mut Value, defaults: &Value) -> bool {
+    if target.is_null() {
+        *target = defaults.clone();
+        return true;
+    }
+
+    match (target, defaults) {
+        (Value::Object(target_map), Value::Object(default_map)) => {
+            let mut changed = false;
+            for (key, default_value) in default_map {
+                match target_map.get_mut(key) {
+                    Some(existing_value) => {
+                        changed |= merge_json_defaults(existing_value, default_value);
+                    }
+                    None => {
+                        target_map.insert(key.clone(), default_value.clone());
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        }
+        (current, default_value) => {
+            if std::mem::discriminant(current) != std::mem::discriminant(default_value) {
+                *current = default_value.clone();
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn load_or_initialize_config(app: &AppHandle) -> Result<(BingoConfig, bool), String> {
+    let path = get_config_path(app);
+    let default_config = BingoConfig::default();
+    let default_value = serde_json::to_value(&default_config).map_err(|e| e.to_string())?;
+
+    if !path.exists() {
+        save_config_file(&path, &default_config)?;
+        return Ok((default_config, true));
+    }
+
+    let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut normalized_value = match serde_json::from_str::<Value>(&content) {
+        Ok(value) if value.is_object() => value,
+        Ok(_) => {
+            log::warn!("設定ファイルの形式が不正なため、既定値で再構築します。パス: {:?}", path);
+            default_value.clone()
+        }
+        Err(error) => {
+            log::warn!("設定ファイルの解析に失敗したため、既定値で再構築します。{}", error);
+            default_value.clone()
+        }
+    };
+
+    let mut was_updated = merge_json_defaults(&mut normalized_value, &default_value);
+    let config = match serde_json::from_value::<BingoConfig>(normalized_value.clone()) {
+        Ok(config) => config,
+        Err(error) => {
+            log::warn!("設定ファイルに不正な値が含まれるため、既定値で再構築します。{}", error);
+            was_updated = true;
+            default_config.clone()
+        }
+    };
+
+    if was_updated {
+        save_config_file(&path, &config)?;
+    }
+
+    Ok((config, was_updated))
+}
+
+fn find_monitor(app: &AppHandle, monitor_id: &str) -> Result<Option<tauri::Monitor>, String> {
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    Ok(monitors.into_iter().find(|monitor| build_monitor_id(monitor) == monitor_id))
+}
+
+fn resolve_effect_video_path(config: &BingoConfig, effect_type: &EffectType, require_enabled: bool) -> Option<PathBuf> {
+    if require_enabled && !config.effect_enabled {
+        return None;
+    }
+
+    let requested_enabled = match effect_type {
+        EffectType::NormalBingo => config.normal_bingo_effect_enabled,
+        EffectType::Special1 => config.special_1_effect_enabled,
+        EffectType::Special25 => config.special_25_effect_enabled,
+    };
+
+    if require_enabled && !requested_enabled {
+        return None;
+    }
+
+    let primary_candidate = match effect_type {
+        EffectType::NormalBingo => resolve_video_path(&config.normal_bingo_video_path),
+        EffectType::Special1 => resolve_video_path(&config.special_1_video_path),
+        EffectType::Special25 => resolve_video_path(&config.special_25_video_path),
+    };
+
+    if primary_candidate.is_file() {
+        return Some(primary_candidate);
+    }
+
+    if !matches!(effect_type, EffectType::NormalBingo) {
+        let fallback = resolve_video_path(&config.normal_bingo_video_path);
+        if fallback.is_file() {
+            info!("専用エフェクト動画が見つからないため、通常ビンゴ動画へフォールバックします。対象: {:?}", effect_type);
+            return Some(fallback);
+        }
+    }
+
+    None
+}
+
+fn resolve_target_monitor(app: &AppHandle, config: &BingoConfig) -> Result<tauri::Monitor, String> {
+    if config.effect_monitor_id.is_empty() {
+        return app
+            .primary_monitor()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "プライマリモニタを取得できません。".to_string());
+    }
+
+    match find_monitor(app, &config.effect_monitor_id)? {
+        Some(monitor) => Ok(monitor),
+        None => {
+            log::warn!("保存済みモニタが見つからないため、プライマリモニタへフォールバックします。");
+            app.primary_monitor()
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "プライマリモニタを取得できません。".to_string())
+        }
+    }
+}
+
+fn play_effect_with_config(
+    app: &AppHandle,
+    config: &BingoConfig,
+    effect_type: EffectType,
+    require_enabled: bool,
+) -> Result<bool, String> {
+    let Some(video_path) = resolve_effect_video_path(config, &effect_type, require_enabled) else {
+        let message = if require_enabled {
+            "再生対象のエフェクト動画が見つからないため、演出をスキップします。"
+        } else {
+            "プレビュー対象の動画が見つからないため、再生をスキップします。"
+        };
+        info!("{}", message);
+        return Ok(false);
+    };
+
+    let effect_window = app
+        .get_webview_window("effect")
+        .ok_or_else(|| "effect ウィンドウが見つかりません。".to_string())?;
+
+    let target_monitor = resolve_target_monitor(app, config)?;
+
+    let _ = effect_window.set_fullscreen(false);
+    effect_window
+        .set_position(PhysicalPosition::new(target_monitor.position().x, target_monitor.position().y))
+        .map_err(|e| e.to_string())?;
+    effect_window.show().map_err(|e| e.to_string())?;
+    effect_window
+        .set_size(Size::Physical(PhysicalSize::new(
+            target_monitor.size().width,
+            target_monitor.size().height,
+        )))
+        .map_err(|e| e.to_string())?;
+    effect_window.set_fullscreen(true).map_err(|e| e.to_string())?;
+
+    let payload = EffectPayload {
+        effect_type,
+        video_path: video_path.to_string_lossy().into_owned(),
+    };
+
+    app.emit_to("effect", "play-bingo-effect", payload)
+        .map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
 // --- Tauri コマンドの実装 ---
 
 #[tauri::command]
@@ -44,17 +314,12 @@ fn log_action(trigger: String, message: String) {
 
 #[tauri::command]
 fn save_settings(app: AppHandle, config: BingoConfig) -> Result<(), String> {
-    let path = get_adjacent_path(&app, "bingo_config.json");
+    let path = get_config_path(&app);
     info!("設定の保存を開始します。パス: {:?}", path);
 
-    let json = serde_json::to_string_pretty(&config).map_err(|e| {
-        log::error!("設定のシリアライズに失敗しました: {}", e);
-        e.to_string()
-    })?;
-
-    fs::write(&path, json).map_err(|e| {
+    save_config_file(&path, &config).map_err(|e| {
         log::error!("設定ファイルの書き込みに失敗しました ({:?}): {}", path, e);
-        e.to_string()
+        e
     })?;
 
     info!("設定の保存が正常に完了しました。");
@@ -63,38 +328,20 @@ fn save_settings(app: AppHandle, config: BingoConfig) -> Result<(), String> {
 
 #[tauri::command]
 fn load_settings(app: AppHandle) -> Result<BingoConfig, String> {
-    let path = get_adjacent_path(&app, "bingo_config.json");
+    let path = get_config_path(&app);
     info!("設定の読み込みを試行します。パス: {:?}", path);
+    let (config, was_updated) = load_or_initialize_config(&app).map_err(|e| {
+        log::error!("設定の読み込みに失敗しました: {}", e);
+        e
+    })?;
 
-    if path.exists() {
-        let content = fs::read_to_string(&path).map_err(|e| {
-            log::error!("設定ファイルの読み込みに失敗しました: {}", e);
-            e.to_string()
-        })?;
-        let config = serde_json::from_str(&content).map_err(|e| {
-            log::error!("設定データの解析に失敗しました: {}", e);
-            e.to_string()
-        })?;
-        info!("設定の読み込みに成功しました。");
-        Ok(config)
+    if was_updated {
+        info!("設定ファイルを検証し、不足項目を補完しました。");
     } else {
-        // ファイルが存在しない場合（初回起動時）
-        info!("設定ファイルが見つからないため、初期設定値を作成して保存します。");
-        let default_config = BingoConfig {
-            x: 22.0, y: 109.0, w: 237.0, h: 239.0, hit_scale: 100.0,
-            se_enabled: true, se_volume: 50.0, tts_enabled: true, tts_volume: 50.0, tts_repeat_count: 1,
-        };
-
-        // デフォルト値をJSON化して保存
-        let json = serde_json::to_string_pretty(&default_config).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| {
-            log::error!("初期設定ファイルの作成に失敗しました: {}", e);
-            e.to_string()
-        })?;
-
-        info!("初期設定ファイルを正常に作成しました。");
-        Ok(default_config)
+        info!("設定の読み込みに成功しました。");
     }
+
+    Ok(config)
 }
 
 #[tauri::command]
@@ -150,6 +397,62 @@ fn load_session(app: AppHandle, filename: String) -> Result<Vec<i32>, String> {
 }
 
 #[tauri::command]
+fn list_effect_monitors(app: AppHandle) -> Result<Vec<MonitorInfo>, String> {
+    let monitors = app.available_monitors().map_err(|e| e.to_string())?;
+    let primary_id = app
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .map(|monitor| build_monitor_id(&monitor));
+
+    let items = monitors
+        .into_iter()
+        .enumerate()
+        .map(|(index, monitor)| {
+            let id = build_monitor_id(&monitor);
+            let is_primary = primary_id.as_ref() == Some(&id);
+            let name = monitor
+                .name()
+                .cloned()
+                .unwrap_or_else(|| format!("Monitor {}", index + 1));
+            let label = format!(
+                "{}{} / {}x{} / {:.0}% / x={} y={}",
+                if is_primary { "[Primary] " } else { "" },
+                name,
+                monitor.size().width,
+                monitor.size().height,
+                monitor.scale_factor() * 100.0,
+                monitor.position().x,
+                monitor.position().y
+            );
+
+            MonitorInfo { id, label }
+        })
+        .collect();
+
+    Ok(items)
+}
+
+#[tauri::command]
+fn play_bingo_effect(app: AppHandle, config: BingoConfig, effect_type: EffectType) -> Result<bool, String> {
+    play_effect_with_config(&app, &config, effect_type, true)
+}
+
+#[tauri::command]
+fn preview_bingo_effect(app: AppHandle, config: BingoConfig, effect_type: EffectType) -> Result<bool, String> {
+    play_effect_with_config(&app, &config, effect_type, false)
+}
+
+#[tauri::command]
+fn hide_effect_window(app: AppHandle) -> Result<(), String> {
+    if let Some(effect_window) = app.get_webview_window("effect") {
+        let _ = effect_window.set_fullscreen(false);
+        effect_window.hide().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn exit_app(app: AppHandle) {
     info!("アプリケーションを終了します。");
     app.exit(0);
@@ -179,8 +482,8 @@ fn main() {
 
     builder = builder.on_window_event(|window, event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
-            // 設定画面（label: "main"）が閉じられようとした場合のみ、阻止して隠す
-            if window.label() == "main" {
+            // メイン設定画面と effect 画面は閉じずに隠す
+            if window.label() == "main" || window.label() == "effect" {
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -242,7 +545,17 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            save_settings, load_settings, save_session, get_sessions, load_session, exit_app, log_action
+            save_settings,
+            load_settings,
+            save_session,
+            get_sessions,
+            load_session,
+            list_effect_monitors,
+            play_bingo_effect,
+            preview_bingo_effect,
+            hide_effect_window,
+            exit_app,
+            log_action
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

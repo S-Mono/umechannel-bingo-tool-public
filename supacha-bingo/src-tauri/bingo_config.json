@@ -8,5 +8,13 @@
   "se_volume": 20.0,
   "tts_enabled": true,
   "tts_volume": 40.0,
-  "tts_repeat_count": 1
+  "tts_repeat_count": 1,
+  "effect_enabled": true,
+  "effect_monitor_id": "",
+  "normal_bingo_effect_enabled": true,
+  "special_1_effect_enabled": false,
+  "special_25_effect_enabled": false,
+  "normal_bingo_video_path": "effects/normal_bingo.mp4",
+  "special_1_video_path": "effects/special_1.mp4",
+  "special_25_video_path": "effects/special_25.mp4"
 }

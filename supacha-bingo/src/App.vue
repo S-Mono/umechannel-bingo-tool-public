@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import ControlPanel from './components/ControlPanel.vue';
 import BingoCard from './components/BingoCard.vue';
+import EffectOverlay from './components/EffectOverlay.vue';
 
 const windowLabel = ref('');
 
@@ -14,6 +15,7 @@ onMounted(() => {
 <template>
   <ControlPanel v-if="windowLabel === 'main'" />
   <BingoCard v-else-if="windowLabel === 'display'" />
+  <EffectOverlay v-else-if="windowLabel === 'effect'" />
 </template>
 
 <style>

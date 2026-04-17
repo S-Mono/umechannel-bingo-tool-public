@@ -1,6 +1,6 @@
 {
   "productName": "supacha-bingo",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "identifier": "com.supacha.bingo",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,10 +22,29 @@
         "alwaysOnTop": true,
         "resizable": false,
         "maximizable": false
+      },
+      {
+        "label": "effect",
+        "title": "Bingo Effect",
+        "width": 1280,
+        "height": 720,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "skipTaskbar": true,
+        "focus": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {
