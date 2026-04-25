@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { nextTick, onMounted, onUnmounted, ref } from 'vue';
 
@@ -19,6 +19,7 @@ const videoSource = ref('');
 const isVisible = ref(false);
 const isHighlightVisible = ref(false);
 const currentEffectType = ref<EffectType | null>(null);
+const idleBackgroundUrl = '/assets/effect_idle_background.svg';
 let playbackRequestId = 0;
 
 let unlistenEffect: (() => void) | null = null;
@@ -45,7 +46,7 @@ const waitForVideoReady = (element: HTMLVideoElement) => new Promise<void>((reso
   element.addEventListener('error', handleError, { once: true });
 });
 
-const hideWindow = async () => {
+const stopPlayback = async () => {
   playbackRequestId += 1;
   const stoppedEffectType = currentEffectType.value;
   currentEffectType.value = null;
@@ -57,12 +58,6 @@ const hideWindow = async () => {
     element.removeAttribute('src');
     element.load();
   }
-  try {
-    await invoke('hide_effect_window');
-  } catch (error) {
-    console.error('Failed to hide effect window:', error);
-  }
-
   await emit('effect-playback-stopped', { effectType: stoppedEffectType });
 };
 
@@ -70,7 +65,7 @@ const playVideo = async (payload: EffectPayload) => {
   const requestId = ++playbackRequestId;
 
   if (!payload.videoPath) {
-    await hideWindow();
+    await stopPlayback();
     return;
   }
 
@@ -82,7 +77,7 @@ const playVideo = async (payload: EffectPayload) => {
 
   const element = videoElement.value;
   if (!element) {
-    await hideWindow();
+    await stopPlayback();
     return;
   }
 
@@ -100,7 +95,7 @@ const playVideo = async (payload: EffectPayload) => {
     await element.play();
   } catch (error) {
     console.error('Failed to play effect video:', error);
-    await hideWindow();
+    await stopPlayback();
   }
 };
 
@@ -114,7 +109,7 @@ onMounted(async () => {
   });
 
   unlistenStopPlayback = await listen('stop-effect-playback', async () => {
-    await hideWindow();
+    await stopPlayback();
   });
 });
 
@@ -139,14 +134,16 @@ onUnmounted(() => {
 <template>
   <div class="effect-root">
     <div class="effect-shell">
+      <div class="idle-background" :class="{ hidden: isVisible }"></div>
+      <img class="idle-background-image" :class="{ hidden: isVisible }" :src="idleBackgroundUrl" alt="" />
       <video
         ref="videoElement"
         class="effect-video"
         :class="{ visible: isVisible }"
         preload="auto"
         playsinline
-        @ended="hideWindow"
-        @error="hideWindow"
+        @ended="stopPlayback"
+        @error="stopPlayback"
       >
         <source :src="videoSource" type="video/mp4" />
       </video>
@@ -160,16 +157,37 @@ onUnmounted(() => {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: transparent;
-  pointer-events: none;
+  background: #00ff00;
 }
 
 .effect-shell {
   position: relative;
   width: 100%;
   height: 100%;
-  background: transparent;
-  pointer-events: none;
+  background: #00ff00;
+}
+
+.idle-background {
+  position: absolute;
+  inset: 0;
+  background: #00ff00;
+  opacity: 1;
+  transition: opacity 0.12s ease;
+}
+
+.idle-background-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 1;
+  transition: opacity 0.12s ease;
+}
+
+.idle-background.hidden,
+.idle-background-image.hidden {
+  opacity: 0;
 }
 
 .effect-video {
@@ -177,10 +195,9 @@ onUnmounted(() => {
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  background: transparent;
+  object-fit: contain;
+  background: #00ff00;
   opacity: 0;
-  pointer-events: none;
   transition: opacity 0.12s ease;
 }
 
@@ -197,7 +214,6 @@ onUnmounted(() => {
     rgba(52, 152, 219, 0.08);
   box-shadow: inset 0 0 140px rgba(52, 152, 219, 0.35);
   transition: opacity 0.16s ease;
-  pointer-events: none;
 }
 
 .monitor-highlight.visible {

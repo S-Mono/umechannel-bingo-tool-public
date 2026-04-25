@@ -1,16 +1,23 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllWebviewWindows } from '@tauri-apps/api/webviewWindow';
 import confetti from 'canvas-confetti';
 
 /** --- アセット・音声定義 --- */
-const BG_IMAGE_PATH = '/assets/background.png';
-const HIT_MARK_IMAGE_PATH = '/assets/hit_mark.png';
-const SE_SPIN_PATH = '/assets/audio/spin_loop.mp3';
-const SE_WIN_PATH = '/assets/audio/win_confirm.mp3';
+const BUNDLED_BG_IMAGE_PATH = '/assets/background.png';
+const BUNDLED_HIT_MARK_IMAGE_PATH = '/assets/hit_mark.png';
+const BUNDLED_SE_SPIN_PATH = '/assets/audio/spin_loop.mp3';
+const BUNDLED_SE_WIN_PATH = '/assets/audio/win_confirm.mp3';
+
+interface RuntimeAssetPaths {
+    backgroundImagePath: string;
+    hitMarkImagePath: string;
+    spinSePath: string;
+    winSePath: string;
+}
 
 /** --- 状態管理 --- */
 const gridPos = ref({
@@ -21,12 +28,76 @@ const hitNumbers = ref<number[]>([]);
 const isSpinning = ref(false);
 const rouletteNumber = ref<number | null>(null);
 const showBorder = ref(false);
+const isEffectPlaying = ref(false);
+const backgroundImagePath = ref(BUNDLED_BG_IMAGE_PATH);
+const hitMarkImagePath = ref(BUNDLED_HIT_MARK_IMAGE_PATH);
+const spinSePath = ref(BUNDLED_SE_SPIN_PATH);
+const winSePath = ref(BUNDLED_SE_WIN_PATH);
 let spinAudio: HTMLAudioElement | null = null;
 const targetNum = ref<number | null>(null);
 let spinInterval: number | null = null; // setIntervalの管理用
+let displayWindowMoveSaveTimer: number | null = null;
+let unlistenDisplayWindowMoved: (() => void) | null = null;
+let unlistenEffectPlaybackStarted: (() => void) | null = null;
+let unlistenEffectPlaybackStopped: (() => void) | null = null;
 
 /** --- ウィンドウ操作ロジック --- */
 const appWindow = getCurrentWindow();
+
+const toRuntimeAssetUrl = (path: string) => /^[a-zA-Z]:[\\/]/.test(path) ? convertFileSrc(path) : path;
+
+const applyRuntimeAssetPaths = (paths: RuntimeAssetPaths) => {
+    backgroundImagePath.value = toRuntimeAssetUrl(paths.backgroundImagePath);
+    hitMarkImagePath.value = toRuntimeAssetUrl(paths.hitMarkImagePath);
+    spinSePath.value = toRuntimeAssetUrl(paths.spinSePath);
+    winSePath.value = toRuntimeAssetUrl(paths.winSePath);
+};
+
+const resetBackgroundImageToFallback = () => {
+    if (backgroundImagePath.value !== BUNDLED_BG_IMAGE_PATH) {
+        backgroundImagePath.value = BUNDLED_BG_IMAGE_PATH;
+    }
+};
+
+const resetHitMarkImageToFallback = () => {
+    if (hitMarkImagePath.value !== BUNDLED_HIT_MARK_IMAGE_PATH) {
+        hitMarkImagePath.value = BUNDLED_HIT_MARK_IMAGE_PATH;
+    }
+};
+
+const createAudio = (path: string, fallbackPath: string, loop = false) => {
+    const audio = new Audio(path);
+    audio.loop = loop;
+
+    if (path !== fallbackPath) {
+        audio.addEventListener('error', () => {
+            audio.src = fallbackPath;
+            audio.load();
+        }, { once: true });
+    }
+
+    return audio;
+};
+
+const saveDisplayWindowPosition = async (x: number, y: number) => {
+    try {
+        await invoke('save_window_position', { label: 'display', x, y });
+    } catch (error) {
+        console.error('Display Window Position Save Error:', error);
+    }
+};
+
+const scheduleDisplayWindowPositionSave = (x: number, y: number) => {
+    if (displayWindowMoveSaveTimer !== null) {
+        window.clearTimeout(displayWindowMoveSaveTimer);
+    }
+
+    displayWindowMoveSaveTimer = window.setTimeout(async () => {
+        await saveDisplayWindowPosition(x, y);
+        displayWindowMoveSaveTimer = null;
+    }, 150);
+};
+
 // ウィンドウ移動を開始する関数
 const startWindowDrag = async (e: MouseEvent) => {
     // 左クリック（button: 0）の時のみドラッグを開始
@@ -47,7 +118,7 @@ const handleContextMenu = (e: MouseEvent) => {
 
     // メニューの物理サイズ（CSSで160pxに設定している場合）
     const menuWidth = 160;
-    const menuHeight = 110; // 項目数に応じた高さ
+    const menuHeight = 148; // 項目数に応じた高さ
 
     // 現在のウィンドウサイズを取得
     const winWidth = window.innerWidth;
@@ -85,6 +156,16 @@ const openSettings = async () => {
         console.error("Window operation failed:", err);
     }
 };
+
+const openEffectWindow = async () => {
+    closeMenu();
+    try {
+        await invoke('show_effect_window');
+    } catch (err) {
+        console.error('Effect window operation failed:', err);
+    }
+};
+
 const closeMenu = () => { showMenu.value = false; };
 
 const exitGame = async () => {
@@ -127,6 +208,34 @@ const cleanupGlobalMenuListeners = () => {
     window.removeEventListener('keydown', handleGlobalEvents);
 };
 
+const requestEffectPlaybackStop = async () => {
+    try {
+        await emit('stop-effect-playback', {});
+    } catch (error) {
+        console.error('Effect Playback Stop Error:', error);
+    }
+};
+
+const handleEscEffectStop = async (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || !isEffectPlaying.value) {
+        return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    await requestEffectPlaybackStop();
+};
+
+const registerEscEffectStopListeners = () => {
+    window.addEventListener('keydown', handleEscEffectStop, true);
+    document.addEventListener('keydown', handleEscEffectStop, true);
+};
+
+const unregisterEscEffectStopListeners = () => {
+    window.removeEventListener('keydown', handleEscEffectStop, true);
+    document.removeEventListener('keydown', handleEscEffectStop, true);
+};
+
 // コンポーネントが消える時にリスナーを確実に掃除（メモリリーク防止）
 onUnmounted(() => {
     cleanupGlobalMenuListeners();
@@ -146,7 +255,7 @@ const speakNumber = (num: number) => {
 
 const playWinSound = () => {
     if (!gridPos.value.se_enabled) return;
-    const audio = new Audio(SE_WIN_PATH);
+    const audio = createAudio(winSePath.value, BUNDLED_SE_WIN_PATH);
     audio.volume = gridPos.value.se_volume / 100;
     audio.play().catch(console.error);
 };
@@ -158,8 +267,7 @@ const startSpinning = () => {
     // 音声再生（既存の spinAudio ロジックをそのまま利用）
     if (gridPos.value.se_enabled) {
         if (!spinAudio) {
-            spinAudio = new Audio(SE_SPIN_PATH);
-            spinAudio.loop = true;
+            spinAudio = createAudio(spinSePath.value, BUNDLED_SE_SPIN_PATH, true);
         }
         const baseVolume = gridPos.value.se_volume / 100;
         const SPIN_GAIN_COEFFICIENT = 1;
@@ -208,11 +316,19 @@ onMounted(async () => {
     try {
         const saved = await invoke<any>('load_settings');
         gridPos.value = { ...gridPos.value, ...saved };
+        const runtimeAssets = await invoke<RuntimeAssetPaths>('get_runtime_asset_paths');
+        applyRuntimeAssetPaths(runtimeAssets);
     } catch (e) { console.error(e); }
+
+    unlistenDisplayWindowMoved = await appWindow.onMoved((event) => {
+        scheduleDisplayWindowPositionSave(event.payload.x, event.payload.y);
+    });
 
     // イベントリスナーの登録
     unlistenUpdate = await listen<any>('grid-update', (e) => { gridPos.value = e.payload; });
     unlistenEdit = await listen<boolean>('edit-mode-update', (e) => { showBorder.value = e.payload; });
+    unlistenEffectPlaybackStarted = await listen('effect-playback-started', () => { isEffectPlaying.value = true; });
+    unlistenEffectPlaybackStopped = await listen('effect-playback-stopped', () => { isEffectPlaying.value = false; });
     //unlistenHit = await listen<{ number: number }>('bingo-hit', (e) => { startRoulette(e.payload.number); });
     unlistenReset = await listen('bingo-reset', () => { hitNumbers.value = []; rouletteNumber.value = null; });
     unlistenSync = await listen<{ hits: number[] }>('bingo-sync-hits', (e) => {
@@ -228,17 +344,40 @@ onMounted(async () => {
         targetNum.value = e.payload.number;
         stopSpinning();
     });
+
+    registerEscEffectStopListeners();
 });
 
 onUnmounted(() => {
     [unlistenUpdate, unlistenEdit, unlistenHit, unlistenReset, unlistenSync, unlistenStop].forEach(u => u && u());
+    if (unlistenEffectPlaybackStarted) {
+        unlistenEffectPlaybackStarted();
+        unlistenEffectPlaybackStarted = null;
+    }
+    if (unlistenEffectPlaybackStopped) {
+        unlistenEffectPlaybackStopped();
+        unlistenEffectPlaybackStopped = null;
+    }
+    if (unlistenDisplayWindowMoved) {
+        unlistenDisplayWindowMoved();
+        unlistenDisplayWindowMoved = null;
+    }
     cleanupGlobalMenuListeners();
+    unregisterEscEffectStopListeners();
+    if (displayWindowMoveSaveTimer !== null) {
+        clearTimeout(displayWindowMoveSaveTimer);
+        displayWindowMoveSaveTimer = null;
+    }
     if (spinInterval) {
         clearInterval(spinInterval);
         spinInterval = null;
     }
     window.speechSynthesis.cancel();
     if (spinAudio) { spinAudio.pause(); spinAudio = null; }
+
+    appWindow.outerPosition()
+        .then((position) => saveDisplayWindowPosition(position.x, position.y))
+        .catch((error) => console.error('Display Window Position Read Error:', error));
 });
 </script>
 
@@ -246,7 +385,7 @@ onUnmounted(() => {
     <div class="bingo-view-container" @mousedown="startWindowDrag" @contextmenu.prevent="handleContextMenu"
         @click="closeMenu">
 
-        <img :src="BG_IMAGE_PATH" class="card-bg-img" />
+        <img :src="backgroundImagePath" class="card-bg-img" @error="resetBackgroundImageToFallback" />
 
         <div class="lottery-display-area">
             <span class="roulette-number">{{ rouletteNumber == null ? '？' : rouletteNumber }}</span>
@@ -259,7 +398,7 @@ onUnmounted(() => {
             <div v-for="n in 25" :key="n" class="cell" :class="{ 'editing': showBorder }">
                 <span v-if="showBorder" class="guide-num">{{ n }}</span>
                 <transition name="pop">
-                    <img v-if="hitNumbers.includes(n)" :src="HIT_MARK_IMAGE_PATH" class="stamp" :style="{
+                    <img v-if="hitNumbers.includes(n)" :src="hitMarkImagePath" class="stamp" @error="resetHitMarkImageToFallback" :style="{
                         width: (gridPos.hit_scale * 1.5) + '%',
                         height: (gridPos.hit_scale * 1.5) + '%'
                     }" />
@@ -271,6 +410,7 @@ onUnmounted(() => {
             <div v-if="showMenu" class="custom-context-menu" :style="{ top: menuPos.y + 'px', left: menuPos.x + 'px' }"
                 @click.stop @mousedown.stop>
                 <div class="menu-item" @click="openSettings">⚙️ 設定画面を開く</div>
+                <div class="menu-item" @click="openEffectWindow">🎬 エフェクト画面を表示</div>
                 <div class="menu-divider"></div>
                 <div class="menu-item exit" @click="exitGame">❌ ゲームを終了</div>
             </div>

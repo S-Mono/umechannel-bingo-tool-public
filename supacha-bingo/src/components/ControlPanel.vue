@@ -2,6 +2,7 @@
 import { ref, watch, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import BingoModal from './BingoModal.vue';
 import { getCompletedBingoKeys, getNewBingoKeys } from '../utils/bingo';
 
@@ -12,6 +13,14 @@ interface GridConfig {
     x: number; y: number; w: number; h: number; hit_scale: number;
     se_enabled: boolean; se_volume: number;
     tts_enabled: boolean; tts_volume: number; tts_repeat_count: number;
+    main_window_x?: number | null;
+    main_window_y?: number | null;
+    display_window_x?: number | null;
+    display_window_y?: number | null;
+    effect_window_x?: number | null;
+    effect_window_y?: number | null;
+    effect_window_width?: number | null;
+    effect_window_height?: number | null;
     effect_enabled: boolean;
     effect_monitor_id: string;
     normal_bingo_effect_enabled: boolean;
@@ -62,10 +71,15 @@ const effectMonitors = ref<EffectMonitor[]>([]);
 const bingoLineKeys = ref<string[]>([]);
 const previewingEffectType = ref<EffectType | null>(null);
 const isEffectPlaying = ref(false);
+const hasLoadedInitialSettings = ref(false);
 let settingsSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
+let mainWindowMoveSaveTimer: ReturnType<typeof window.setTimeout> | null = null;
 let unlistenAnimationFinished: (() => void) | null = null;
 let unlistenEffectPlaybackStarted: (() => void) | null = null;
 let unlistenEffectPlaybackStopped: (() => void) | null = null;
+let unlistenMainWindowMoved: (() => void) | null = null;
+
+const mainWindow = getCurrentWindow();
 
 const cloneGridConfig = (config: GridConfig): GridConfig => ({ ...config });
 
@@ -82,6 +96,53 @@ const saveCurrentSettings = async () => {
     await invoke('save_settings', { config: nextConfig });
 };
 
+const saveMainWindowPosition = async (x: number, y: number) => {
+    try {
+        await invoke('save_window_position', { label: 'main', x, y });
+    } catch (error) {
+        console.error('Main Window Position Save Error:', error);
+    }
+};
+
+const scheduleMainWindowPositionSave = (x: number, y: number) => {
+    if (mainWindowMoveSaveTimer) {
+        window.clearTimeout(mainWindowMoveSaveTimer);
+    }
+
+    mainWindowMoveSaveTimer = window.setTimeout(async () => {
+        await saveMainWindowPosition(x, y);
+        mainWindowMoveSaveTimer = null;
+    }, 150);
+};
+
+const requestEffectPlaybackStop = async () => {
+    try {
+        await emit('stop-effect-playback', {});
+    } catch (error) {
+        console.error('Effect Playback Stop Error:', error);
+    }
+};
+
+const handleEscEffectStop = async (event: KeyboardEvent) => {
+    if (event.key !== 'Escape' || !isEffectPlaying.value) {
+        return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    await requestEffectPlaybackStop();
+};
+
+const registerEscEffectStopListeners = () => {
+    window.addEventListener('keydown', handleEscEffectStop, true);
+    document.addEventListener('keydown', handleEscEffectStop, true);
+};
+
+const unregisterEscEffectStopListeners = () => {
+    window.removeEventListener('keydown', handleEscEffectStop, true);
+    document.removeEventListener('keydown', handleEscEffectStop, true);
+};
+
 /** --- 2. ライフサイクル --- */
 onMounted(async () => {
     try {
@@ -92,6 +153,7 @@ onMounted(async () => {
         await refreshSessionList();
         await refreshEffectMonitors();
         await syncEffectWindow(false, grid.value);
+        hasLoadedInitialSettings.value = true;
 
         unlistenEffectPlaybackStarted = await listen<EffectPlaybackStartedPayload>('effect-playback-started', () => {
             isEffectPlaying.value = true;
@@ -104,6 +166,12 @@ onMounted(async () => {
             }
         });
 
+        unlistenMainWindowMoved = await mainWindow.onMoved((event) => {
+            scheduleMainWindowPositionSave(event.payload.x, event.payload.y);
+        });
+
+        registerEscEffectStopListeners();
+
         unlistenAnimationFinished = await listen<{ number: number }>('bingo-animation-finished', async (event) => {
             if (!isLive.value) return;
 
@@ -115,7 +183,12 @@ onMounted(async () => {
             bingoLineKeys.value = getCompletedBingoKeys(hitHistory.value);
             isAnimating.value = false;
 
-            if (newBingoKeys.length > 0) {
+            const currentConfig = getCurrentConfig();
+            const shouldPlaySpecialEffect =
+                (event.payload.number === 1 && currentConfig.special_1_effect_enabled) ||
+                (event.payload.number === 25 && currentConfig.special_25_effect_enabled);
+
+            if (newBingoKeys.length > 0 || shouldPlaySpecialEffect) {
                 await playBingoEffect(event.payload.number);
             }
 
@@ -128,6 +201,11 @@ onUnmounted(() => {
     if (settingsSaveTimer) {
         window.clearTimeout(settingsSaveTimer);
         settingsSaveTimer = null;
+    }
+
+    if (mainWindowMoveSaveTimer) {
+        window.clearTimeout(mainWindowMoveSaveTimer);
+        mainWindowMoveSaveTimer = null;
     }
 
     if (unlistenAnimationFinished) {
@@ -144,6 +222,17 @@ onUnmounted(() => {
         unlistenEffectPlaybackStopped();
         unlistenEffectPlaybackStopped = null;
     }
+
+    if (unlistenMainWindowMoved) {
+        unlistenMainWindowMoved();
+        unlistenMainWindowMoved = null;
+    }
+
+    unregisterEscEffectStopListeners();
+
+    mainWindow.outerPosition()
+        .then((position) => saveMainWindowPosition(position.x, position.y))
+        .catch((error) => console.error('Main Window Position Read Error:', error));
 });
 
 const refreshSessionList = async () => {
@@ -230,11 +319,7 @@ const previewEffect = async (effectType: EffectType) => {
 };
 
 const stopPreviewEffect = async () => {
-    try {
-        await emit('stop-effect-playback', {});
-    } catch (error) {
-        console.error('Effect Preview Stop Error:', error);
-    }
+    await requestEffectPlaybackStop();
 };
 
 /** --- 3. セッション管理 --- */
@@ -297,9 +382,18 @@ const getSecureRandomInt = (max: number): number => {
 };
 
 const isSpinning = ref(false); // ルーレット回転中フラグ
+const getAvailableNumbers = () => Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
+const hasAvailableNumbers = () => getAvailableNumbers().length > 0;
+
 const spin = () => {
     // 閲覧モード中、または演出中（かつ回転中でない）は操作不能
     if (!isLive.value || (isAnimating.value && !isSpinning.value)) return;
+
+    const available = getAvailableNumbers();
+
+    if (!isSpinning.value && available.length === 0) {
+        return modal.value?.show("番号はすべて選出しました！", "alert");
+    }
 
     if (!isSpinning.value) {
         // --- [フェーズ1] 抽選開始（回転アニメーション スタート） ---
@@ -309,7 +403,6 @@ const spin = () => {
 
     } else {
         // --- [フェーズ2] ストップ押下（回転アニメーション ストップ＆番号確定） ---
-        const available = Array.from({ length: 25 }, (_, i) => i + 1).filter(n => !hitHistory.value.includes(n));
         if (available.length === 0) return modal.value?.show("番号はすべて選出しました！", "alert");
 
         redoStack.value = [];
@@ -358,6 +451,11 @@ const resetBingo = async () => {
 /** --- 5. 設定管理 --- */
 watch(tempGrid, (val) => {
     emit('grid-update', { ...val });
+
+    if (!hasLoadedInitialSettings.value) {
+        return;
+    }
+
     scheduleSettingsSave();
 }, { deep: true });
 watch(() => [tempGrid.value.effect_enabled, tempGrid.value.effect_monitor_id], () => {
@@ -406,7 +504,9 @@ const cancelEdit = () => {
         </section>
 
         <section class="main-mgr">
-            <button class="spin-btn" :disabled="!isLive || (isAnimating && !isSpinning)" @click="spin">
+            <button class="spin-btn"
+                :disabled="!isLive || (isAnimating && !isSpinning) || (!isSpinning && !hasAvailableNumbers())"
+                @click="spin">
                 <template v-if="!isLive">⚠️ 閲覧モード</template>
                 <template v-else>
                     {{ isSpinning ? '！！ ストップ ！！' : (isAnimating ? '確定演出中...' : '！抽選開始！') }}
@@ -482,8 +582,7 @@ const cancelEdit = () => {
                         </div>
                     </div>
 
-                    <div class="setting-item"
-                        @mouseenter="setEffectMonitorHighlight(true)"
+                    <div class="setting-item" @mouseenter="setEffectMonitorHighlight(true)"
                         @mouseleave="setEffectMonitorHighlight(false)">
                         <label class="item-label">再生モニタ</label>
                         <select v-model="tempGrid.effect_monitor_id" class="select-input"

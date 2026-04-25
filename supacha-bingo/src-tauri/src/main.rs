@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Size, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use log::info;
@@ -12,10 +13,138 @@ use tauri_plugin_log::{Target, TargetKind};
 const DEFAULT_NORMAL_BINGO_VIDEO_PATH: &str = "effects/normal_bingo.mp4";
 const DEFAULT_SPECIAL_1_VIDEO_PATH: &str = "effects/special_1.mp4";
 const DEFAULT_SPECIAL_25_VIDEO_PATH: &str = "effects/special_25.mp4";
+const DEFAULT_CARD_BACKGROUND_PATH: &str = "assets/card/background.png";
+const DEFAULT_HIT_MARK_IMAGE_PATH: &str = "assets/card/hit_mark.png";
+const DEFAULT_SPIN_SE_PATH: &str = "assets/se/spin_loop.mp3";
+const DEFAULT_WIN_SE_PATH: &str = "assets/se/win_confirm.mp3";
 const MAIN_WINDOW_DEFAULT_WIDTH: u32 = 450;
 const MAIN_WINDOW_DEFAULT_HEIGHT: u32 = 650;
+const DISPLAY_WINDOW_DEFAULT_WIDTH: u32 = 282;
+const DISPLAY_WINDOW_DEFAULT_HEIGHT: u32 = 368;
+const EFFECT_WINDOW_DEFAULT_WIDTH: u32 = 1920;
+const EFFECT_WINDOW_DEFAULT_HEIGHT: u32 = 1080;
 
-// --- データ構造体 ---
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedWindow {
+    Main,
+    Display,
+    Effect,
+}
+
+impl ManagedWindow {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Display => "display",
+            Self::Effect => "effect",
+        }
+    }
+
+    fn default_size(self) -> PhysicalSize<u32> {
+        match self {
+            Self::Main => PhysicalSize::new(MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_DEFAULT_HEIGHT),
+            Self::Display => PhysicalSize::new(DISPLAY_WINDOW_DEFAULT_WIDTH, DISPLAY_WINDOW_DEFAULT_HEIGHT),
+            Self::Effect => PhysicalSize::new(EFFECT_WINDOW_DEFAULT_WIDTH, EFFECT_WINDOW_DEFAULT_HEIGHT),
+        }
+    }
+
+    fn saved_position(self, config: &BingoConfig) -> (Option<i32>, Option<i32>) {
+        match self {
+            Self::Main => (config.main_window_x, config.main_window_y),
+            Self::Display => (config.display_window_x, config.display_window_y),
+            Self::Effect => (config.effect_window_x, config.effect_window_y),
+        }
+    }
+
+    fn set_saved_position(self, config: &mut BingoConfig, x: i32, y: i32) {
+        match self {
+            Self::Main => {
+                config.main_window_x = Some(x);
+                config.main_window_y = Some(y);
+            }
+            Self::Display => {
+                config.display_window_x = Some(x);
+                config.display_window_y = Some(y);
+            }
+            Self::Effect => {
+                config.effect_window_x = Some(x);
+                config.effect_window_y = Some(y);
+            }
+        }
+    }
+
+    fn saved_size(self, config: &BingoConfig) -> (Option<u32>, Option<u32>) {
+        match self {
+            Self::Main => (None, None),
+            Self::Display => (None, None),
+            Self::Effect => (config.effect_window_width, config.effect_window_height),
+        }
+    }
+
+    fn set_saved_size(self, config: &mut BingoConfig, width: u32, height: u32) {
+        match self {
+            Self::Main | Self::Display => {}
+            Self::Effect => {
+                config.effect_window_width = Some(width);
+                config.effect_window_height = Some(height);
+            }
+        }
+    }
+
+    fn should_show_on_startup(self, config: &BingoConfig) -> bool {
+        match self {
+            Self::Effect => config.effect_enabled,
+            Self::Main | Self::Display => true,
+        }
+    }
+
+    fn from_label(label: &str) -> Result<Self, String> {
+        match label {
+            "main" => Ok(Self::Main),
+            "display" => Ok(Self::Display),
+            "effect" => Ok(Self::Effect),
+            _ => Err(format!("未対応のウィンドウです: {}", label)),
+        }
+    }
+}
+
+const MANAGED_WINDOWS: [ManagedWindow; 3] = [ManagedWindow::Main, ManagedWindow::Display, ManagedWindow::Effect];
+const FOCUS_MANAGED_WINDOWS: [ManagedWindow; 2] = [ManagedWindow::Main, ManagedWindow::Display];
+
+fn focused_managed_window(app: &AppHandle) -> Option<ManagedWindow> {
+    FOCUS_MANAGED_WINDOWS.into_iter().find(|managed_window| {
+        app.get_webview_window(managed_window.label())
+            .and_then(|window| window.is_focused().ok())
+            .unwrap_or(false)
+    })
+}
+
+fn restore_managed_window_focus(app: &AppHandle, managed_window: Option<ManagedWindow>) {
+    let Some(managed_window) = managed_window else {
+        return;
+    };
+
+    let Some(window) = app.get_webview_window(managed_window.label()) else {
+        return;
+    };
+
+    if let Err(error) = window.set_focus() {
+        log::warn!("{} ウィンドウへのフォーカス復元に失敗しました: {}", managed_window.label(), error);
+    }
+}
+
+fn schedule_restore_managed_window_focus(app: &AppHandle, managed_window: Option<ManagedWindow>) {
+    let app_handle = app.clone();
+
+    std::thread::spawn(move || {
+        restore_managed_window_focus(&app_handle, managed_window);
+
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(60));
+            restore_managed_window_focus(&app_handle, managed_window);
+        }
+    });
+}
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct BingoConfig {
@@ -24,6 +153,12 @@ pub struct BingoConfig {
     pub tts_enabled: bool, pub tts_volume: f64, pub tts_repeat_count: i32,
     pub main_window_x: Option<i32>,
     pub main_window_y: Option<i32>,
+    pub display_window_x: Option<i32>,
+    pub display_window_y: Option<i32>,
+    pub effect_window_x: Option<i32>,
+    pub effect_window_y: Option<i32>,
+    pub effect_window_width: Option<u32>,
+    pub effect_window_height: Option<u32>,
     pub effect_enabled: bool,
     pub effect_monitor_id: String,
     pub normal_bingo_effect_enabled: bool,
@@ -49,6 +184,12 @@ impl Default for BingoConfig {
             tts_repeat_count: 1,
             main_window_x: None,
             main_window_y: None,
+            display_window_x: None,
+            display_window_y: None,
+            effect_window_x: None,
+            effect_window_y: None,
+            effect_window_width: None,
+            effect_window_height: None,
             effect_enabled: true,
             effect_monitor_id: String::new(),
             normal_bingo_effect_enabled: true,
@@ -91,6 +232,15 @@ struct EffectPayload {
     video_path: String,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeAssetPaths {
+    background_image_path: String,
+    hit_mark_image_path: String,
+    spin_se_path: String,
+    win_se_path: String,
+}
+
 // --- ヘルパー関数 ---
 fn get_base_dir() -> PathBuf {
     std::env::current_exe()
@@ -105,6 +255,101 @@ fn get_adjacent_path(_app: &AppHandle, sub_path: &str) -> PathBuf {
 
 fn get_config_path(app: &AppHandle) -> PathBuf {
     get_adjacent_path(app, "bingo_config.json")
+}
+
+fn bundled_asset_path(relative_path: &str) -> String {
+    format!("/{}", relative_path.replace('\\', "/"))
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(parent).map_err(|e| e.to_string())
+}
+
+fn ensure_runtime_asset_file(app: &AppHandle, relative_path: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = get_adjacent_path(app, relative_path);
+
+    if path.is_file() {
+        return Ok(());
+    }
+
+    ensure_parent_dir(&path)?;
+    fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+fn ensure_runtime_note_file(app: &AppHandle, relative_path: &str, message: &str) -> Result<(), String> {
+    let path = get_adjacent_path(app, relative_path);
+
+    if path.is_file() {
+        return Ok(());
+    }
+
+    ensure_parent_dir(&path)?;
+    fs::write(path, format!("{}\n", message)).map_err(|e| e.to_string())
+}
+
+fn ensure_runtime_assets(app: &AppHandle) {
+    let assets = [
+        (DEFAULT_CARD_BACKGROUND_PATH, include_bytes!("../../public/assets/background.png") as &[u8]),
+        (DEFAULT_HIT_MARK_IMAGE_PATH, include_bytes!("../../public/assets/hit_mark.png") as &[u8]),
+        (DEFAULT_SPIN_SE_PATH, include_bytes!("../../public/assets/audio/spin_loop.mp3") as &[u8]),
+        (DEFAULT_WIN_SE_PATH, include_bytes!("../../public/assets/audio/win_confirm.mp3") as &[u8]),
+    ];
+
+    for (relative_path, bytes) in assets {
+        if let Err(error) = ensure_runtime_asset_file(app, relative_path, bytes) {
+            log::warn!("外部アセットの初期配置に失敗しました: {} ({})", relative_path, error);
+        }
+    }
+
+    let note_files = [
+        (
+            "assets/se/番号抽選はspin_loop.mp3のファイル名で配置してください",
+            "番号抽選はspin_loop.mp3のファイル名で配置してください",
+        ),
+        (
+            "assets/se/番号確定はwin_confirm.mp3のファイル名で配置してください",
+            "番号確定はwin_confirm.mp3のファイル名で配置してください",
+        ),
+        (
+            "assets/card/背景画像はbackground.pngのファイル名で配置してください",
+            "背景画像はbackground.pngのファイル名で配置してください",
+        ),
+        (
+            "assets/card/ヒットマーク画像はhit_mark.pngのファイル名で配置してください",
+            "ヒットマーク画像はhit_mark.pngのファイル名で配置してください",
+        ),
+    ];
+
+    for (relative_path, message) in note_files {
+        if let Err(error) = ensure_runtime_note_file(app, relative_path, message) {
+            log::warn!("説明ファイルの初期配置に失敗しました: {} ({})", relative_path, error);
+        }
+    }
+}
+
+fn resolve_runtime_asset_path(app: &AppHandle, relative_path: &str) -> String {
+    let adjacent = get_adjacent_path(app, relative_path);
+
+    if adjacent.is_file() {
+        adjacent.to_string_lossy().into_owned()
+    } else {
+        bundled_asset_path(relative_path)
+    }
+}
+
+fn collect_runtime_asset_paths(app: &AppHandle) -> RuntimeAssetPaths {
+    ensure_runtime_assets(app);
+
+    RuntimeAssetPaths {
+        background_image_path: resolve_runtime_asset_path(app, DEFAULT_CARD_BACKGROUND_PATH),
+        hit_mark_image_path: resolve_runtime_asset_path(app, DEFAULT_HIT_MARK_IMAGE_PATH),
+        spin_se_path: resolve_runtime_asset_path(app, DEFAULT_SPIN_SE_PATH),
+        win_se_path: resolve_runtime_asset_path(app, DEFAULT_WIN_SE_PATH),
+    }
 }
 
 fn build_monitor_id(monitor: &tauri::Monitor) -> String {
@@ -156,6 +401,10 @@ fn merge_json_defaults(target: &mut Value, defaults: &Value) -> bool {
             changed
         }
         (current, default_value) => {
+            if default_value.is_null() {
+                return false;
+            }
+
             if std::mem::discriminant(current) != std::mem::discriminant(default_value) {
                 *current = default_value.clone();
                 true
@@ -235,13 +484,14 @@ fn clamp_window_position_to_monitor(
     PhysicalPosition::new(desired_x.clamp(monitor_x, max_x), desired_y.clamp(monitor_y, max_y))
 }
 
-fn resolve_main_window_position(
+fn resolve_window_position(
     app: &AppHandle,
-    config: &BingoConfig,
+    saved_x: Option<i32>,
+    saved_y: Option<i32>,
     window_width: u32,
     window_height: u32,
 ) -> Result<Option<PhysicalPosition<i32>>, String> {
-    let (Some(saved_x), Some(saved_y)) = (config.main_window_x, config.main_window_y) else {
+    let (Some(saved_x), Some(saved_y)) = (saved_x, saved_y) else {
         return Ok(None);
     };
 
@@ -278,34 +528,226 @@ fn resolve_main_window_position(
     )))
 }
 
-fn save_main_window_position(app: &AppHandle, x: i32, y: i32) -> Result<(), String> {
+fn update_other_window_positions(app: &AppHandle, current_window: ManagedWindow, config: &mut BingoConfig) {
+    for window in MANAGED_WINDOWS {
+        if window == current_window {
+            continue;
+        }
+
+        if let Some((x, y)) = current_window_position(app, window.label()) {
+            window.set_saved_position(config, x, y);
+        }
+    }
+}
+
+fn save_window_position_to_config(app: &AppHandle, label: &str, x: i32, y: i32) -> Result<(), String> {
     let path = get_config_path(app);
     let (mut config, _) = load_or_initialize_config(app)?;
 
-    if config.main_window_x == Some(x) && config.main_window_y == Some(y) {
+    let managed_window = ManagedWindow::from_label(label)?;
+    let stored_position = managed_window.saved_position(&config);
+
+    if stored_position == (Some(x), Some(y)) {
         return Ok(());
     }
 
-    config.main_window_x = Some(x);
-    config.main_window_y = Some(y);
+    update_other_window_positions(app, managed_window, &mut config);
+    managed_window.set_saved_position(&mut config, x, y);
+
     save_config_file(&path, &config)
 }
 
-fn persist_main_window_position(window: &tauri::Window) {
-    if window.label() != "main" {
-        return;
+fn save_window_size_to_config(app: &AppHandle, label: &str, width: u32, height: u32) -> Result<(), String> {
+    let path = get_config_path(app);
+    let (mut config, _) = load_or_initialize_config(app)?;
+
+    let managed_window = ManagedWindow::from_label(label)?;
+    let stored_size = managed_window.saved_size(&config);
+
+    if stored_size == (Some(width), Some(height)) {
+        return Ok(());
     }
 
+    managed_window.set_saved_size(&mut config, width, height);
+    save_config_file(&path, &config)
+}
+
+fn persist_window_position(window: &tauri::Window) {
     match window.outer_position() {
         Ok(position) => {
-            if let Err(error) = save_main_window_position(&window.app_handle(), position.x, position.y) {
-                log::warn!("メインウィンドウ位置の保存に失敗しました: {}", error);
+            if let Err(error) = save_window_position_to_config(&window.app_handle(), window.label(), position.x, position.y) {
+                log::warn!("{} ウィンドウ位置の保存に失敗しました: {}", window.label(), error);
             }
         }
         Err(error) => {
-            log::warn!("メインウィンドウ位置の取得に失敗しました: {}", error);
+            log::warn!("{} ウィンドウ位置の取得に失敗しました: {}", window.label(), error);
         }
     }
+}
+
+fn persist_named_window_position(app: &AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+
+    match window.outer_position() {
+        Ok(position) => {
+            if let Err(error) = save_window_position_to_config(app, label, position.x, position.y) {
+                log::warn!("{} ウィンドウ位置の保存に失敗しました: {}", label, error);
+            }
+        }
+        Err(error) => {
+            log::warn!("{} ウィンドウ位置の取得に失敗しました: {}", label, error);
+        }
+    }
+}
+
+fn current_window_size(app: &AppHandle, label: &str) -> Option<(u32, u32)> {
+    let Some(window) = app.get_webview_window(label) else {
+        log::warn!("{} ウィンドウが取得できないため、現在サイズを読めません。", label);
+        return None;
+    };
+
+    match window.outer_size() {
+        Ok(size) => Some((size.width, size.height)),
+        Err(error) => {
+            log::warn!("{} ウィンドウ現在サイズの取得に失敗しました: {}", label, error);
+            None
+        }
+    }
+}
+
+fn persist_window_size(window: &tauri::Window) {
+    match window.outer_size() {
+        Ok(size) => {
+            if let Err(error) = save_window_size_to_config(&window.app_handle(), window.label(), size.width, size.height) {
+                log::warn!("{} ウィンドウサイズの保存に失敗しました: {}", window.label(), error);
+            }
+        }
+        Err(error) => {
+            log::warn!("{} ウィンドウサイズの取得に失敗しました: {}", window.label(), error);
+        }
+    }
+}
+
+fn persist_named_window_size(app: &AppHandle, label: &str) {
+    let Some(window) = app.get_webview_window(label) else {
+        return;
+    };
+
+    match window.outer_size() {
+        Ok(size) => {
+            if let Err(error) = save_window_size_to_config(app, label, size.width, size.height) {
+                log::warn!("{} ウィンドウサイズの保存に失敗しました: {}", label, error);
+            }
+        }
+        Err(error) => {
+            log::warn!("{} ウィンドウサイズの取得に失敗しました: {}", label, error);
+        }
+    }
+}
+
+fn current_window_position(app: &AppHandle, label: &str) -> Option<(i32, i32)> {
+    let Some(window) = app.get_webview_window(label) else {
+        log::warn!("{} ウィンドウが取得できないため、現在位置を読めません。", label);
+        return None;
+    };
+
+    match window.outer_position() {
+        Ok(position) => Some((position.x, position.y)),
+        Err(error) => {
+            log::warn!("{} ウィンドウ現在位置の取得に失敗しました: {}", label, error);
+            None
+        }
+    }
+}
+
+fn restore_named_window_position(app: &AppHandle, label: &str) -> Result<bool, String> {
+    let (config, _) = load_or_initialize_config(app)?;
+    let managed_window = ManagedWindow::from_label(label)?;
+    let Some(window) = app.get_webview_window(managed_window.label()) else {
+        return Err(format!("{} ウィンドウが見つかりません。", managed_window.label()));
+    };
+
+    let window_size = window.outer_size().unwrap_or(managed_window.default_size());
+    let (saved_x, saved_y) = managed_window.saved_position(&config);
+    let saved_position = resolve_window_position(app, saved_x, saved_y, window_size.width, window_size.height)?;
+
+    let Some(position) = saved_position else {
+        return Ok(false);
+    };
+
+    window.set_position(position).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn enforce_named_window_position(app: &AppHandle, label: &'static str, attempts: usize, delay_ms: u64) {
+    let restore_handle = app.clone();
+
+    std::thread::spawn(move || {
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+
+            match restore_named_window_position(&restore_handle, label) {
+                Ok(true) | Ok(false) => {}
+                Err(error) => log::warn!("{} ウィンドウの再配置に失敗しました。attempt={} error={}", label, attempt + 1, error),
+            }
+        }
+    });
+}
+
+fn initialize_managed_window(app: &tauri::App, config: &BingoConfig, managed_window: ManagedWindow) -> Result<(), String> {
+    let Some(window) = app.get_webview_window(managed_window.label()) else {
+        return Ok(());
+    };
+
+    let (saved_width, saved_height) = managed_window.saved_size(config);
+    let window_size = PhysicalSize::new(
+        saved_width.unwrap_or(managed_window.default_size().width),
+        saved_height.unwrap_or(managed_window.default_size().height),
+    );
+
+    if saved_width.is_some() || saved_height.is_some() {
+        window
+            .set_size(Size::Physical(window_size))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let (saved_x, saved_y) = managed_window.saved_position(config);
+
+    let resolved_position = if saved_x.is_some() && saved_y.is_some() {
+        resolve_window_position(
+            &app.handle(),
+            saved_x,
+            saved_y,
+            window_size.width,
+            window_size.height,
+        )?
+    } else if managed_window == ManagedWindow::Effect {
+        let target_monitor = resolve_target_monitor(&app.handle(), config)?;
+        Some(PhysicalPosition::new(target_monitor.position().x, target_monitor.position().y))
+    } else {
+        None
+    };
+
+    if let Some(position) = resolved_position {
+        window.set_position(position).map_err(|e| e.to_string())?;
+    }
+
+    if managed_window.should_show_on_startup(config) {
+        window.show().map_err(|e| e.to_string())?;
+    } else {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn save_window_position(app: AppHandle, label: String, x: i32, y: i32) -> Result<(), String> {
+    save_window_position_to_config(&app, &label, x, y)
 }
 
 fn resolve_effect_video_path(config: &BingoConfig, effect_type: &EffectType, require_enabled: bool) -> Option<PathBuf> {
@@ -368,31 +810,26 @@ fn sync_effect_window_state(app: &AppHandle, config: &BingoConfig, visible: bool
         .get_webview_window("effect")
         .ok_or_else(|| "effect ウィンドウが見つかりません。".to_string())?;
 
-    let target_monitor = resolve_target_monitor(app, config)?;
-
     effect_window
-        .set_ignore_cursor_events(true)
+        .set_ignore_cursor_events(false)
         .map_err(|e| e.to_string())?;
 
-    if !visible {
-        let _ = effect_window.set_fullscreen(false);
+    if !config.effect_enabled {
         effect_window.hide().map_err(|e| e.to_string())?;
         return Ok(());
     }
 
-    let _ = effect_window.set_fullscreen(false);
-    effect_window
-        .set_position(PhysicalPosition::new(target_monitor.position().x, target_monitor.position().y))
-        .map_err(|e| e.to_string())?;
-    effect_window
-        .set_size(Size::Physical(PhysicalSize::new(
-            target_monitor.size().width,
-            target_monitor.size().height,
-        )))
-        .map_err(|e| e.to_string())?;
-
+    let previously_focused_window = if visible {
+        focused_managed_window(app)
+    } else {
+        None
+    };
+    let _ = effect_window.unminimize();
     effect_window.show().map_err(|e| e.to_string())?;
-    effect_window.set_fullscreen(true).map_err(|e| e.to_string())?;
+
+    if visible {
+        schedule_restore_managed_window_focus(app, previously_focused_window);
+    }
 
     Ok(())
 }
@@ -444,7 +881,51 @@ fn save_settings(app: AppHandle, config: BingoConfig) -> Result<(), String> {
     let path = get_config_path(&app);
     info!("設定の保存を開始します。パス: {:?}", path);
 
-    save_config_file(&path, &config).map_err(|e| {
+    let (existing_config, _) = load_or_initialize_config(&app)?;
+    let mut merged_config = config;
+
+    let main_window_position = current_window_position(&app, "main")
+        .map(|(x, y)| (Some(x), Some(y)))
+        .unwrap_or((existing_config.main_window_x, existing_config.main_window_y));
+    merged_config.main_window_x = main_window_position.0;
+    merged_config.main_window_y = main_window_position.1;
+    info!(
+        "main 保存座標: x={:?}, y={:?}",
+        merged_config.main_window_x,
+        merged_config.main_window_y
+    );
+
+    let display_window_position = current_window_position(&app, "display")
+        .map(|(x, y)| (Some(x), Some(y)))
+        .unwrap_or((existing_config.display_window_x, existing_config.display_window_y));
+    merged_config.display_window_x = display_window_position.0;
+    merged_config.display_window_y = display_window_position.1;
+    info!(
+        "display 保存座標: x={:?}, y={:?}",
+        merged_config.display_window_x,
+        merged_config.display_window_y
+    );
+
+    let effect_window_position = current_window_position(&app, "effect")
+        .map(|(x, y)| (Some(x), Some(y)))
+        .unwrap_or((existing_config.effect_window_x, existing_config.effect_window_y));
+    merged_config.effect_window_x = effect_window_position.0;
+    merged_config.effect_window_y = effect_window_position.1;
+
+    let effect_window_size = current_window_size(&app, "effect")
+        .map(|(width, height)| (Some(width), Some(height)))
+        .unwrap_or((existing_config.effect_window_width, existing_config.effect_window_height));
+    merged_config.effect_window_width = effect_window_size.0;
+    merged_config.effect_window_height = effect_window_size.1;
+    info!(
+        "effect 保存状態: x={:?}, y={:?}, width={:?}, height={:?}",
+        merged_config.effect_window_x,
+        merged_config.effect_window_y,
+        merged_config.effect_window_width,
+        merged_config.effect_window_height
+    );
+
+    save_config_file(&path, &merged_config).map_err(|e| {
         log::error!("設定ファイルの書き込みに失敗しました ({:?}): {}", path, e);
         e
     })?;
@@ -524,6 +1005,11 @@ fn load_session(app: AppHandle, filename: String) -> Result<Vec<i32>, String> {
 }
 
 #[tauri::command]
+fn get_runtime_asset_paths(app: AppHandle) -> Result<RuntimeAssetPaths, String> {
+    Ok(collect_runtime_asset_paths(&app))
+}
+
+#[tauri::command]
 fn list_effect_monitors(app: AppHandle) -> Result<Vec<MonitorInfo>, String> {
     let monitors = app.available_monitors().map_err(|e| e.to_string())?;
     let primary_id = app
@@ -572,8 +1058,6 @@ fn preview_bingo_effect(app: AppHandle, config: BingoConfig, effect_type: Effect
 #[tauri::command]
 fn hide_effect_window(app: AppHandle) -> Result<(), String> {
     if let Some(effect_window) = app.get_webview_window("effect") {
-        let _ = effect_window.set_ignore_cursor_events(true);
-        let _ = effect_window.set_fullscreen(false);
         effect_window.hide().map_err(|e| e.to_string())?;
     }
 
@@ -586,14 +1070,24 @@ fn show_effect_window(app: AppHandle) -> Result<(), String> {
         .get_webview_window("effect")
         .ok_or_else(|| "effect ウィンドウが見つかりません。".to_string())?;
 
+    let _ = effect_window.unminimize();
     effect_window.show().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn exit_app(app: AppHandle) {
+fn finalize_app_exit(app: &AppHandle) {
+    persist_named_window_position(app, "main");
+    persist_named_window_position(app, "display");
+    persist_named_window_position(app, "effect");
+    persist_named_window_size(app, "effect");
     info!("アプリケーションを終了します。");
     app.exit(0);
+}
+
+#[tauri::command]
+fn exit_app(app: AppHandle) {
+    finalize_app_exit(&app);
 }
 
 // --- メイン関数 ---
@@ -621,15 +1115,30 @@ fn main() {
     builder = builder.on_window_event(|window, event| {
         match event {
             WindowEvent::Moved(_) => {
-                persist_main_window_position(window);
+                if window.label() == "main" || window.label() == "display" || window.label() == "effect" {
+                    persist_window_position(window);
+                }
+            }
+            WindowEvent::Resized(_) => {
+                if window.label() == "effect" {
+                    persist_window_size(window);
+                }
             }
             WindowEvent::CloseRequested { api, .. } => {
-                if window.label() == "main" {
-                    persist_main_window_position(window);
+                if window.label() == "main" || window.label() == "display" || window.label() == "effect" {
+                    persist_window_position(window);
+                }
+                if window.label() == "effect" {
+                    persist_window_size(window);
                 }
 
-                // メイン設定画面と effect 画面は閉じずに隠す
-                if window.label() == "main" || window.label() == "effect" {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    finalize_app_exit(&window.app_handle());
+                }
+
+                // effect 画面は閉じずに隠す
+                if window.label() == "effect" {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -690,19 +1199,13 @@ fn main() {
             }
 
             let (config, _) = load_or_initialize_config(&app_handle)?;
-            if let Some(main_window) = app.get_webview_window("main") {
-                let window_size = main_window
-                    .outer_size()
-                    .unwrap_or(PhysicalSize::new(MAIN_WINDOW_DEFAULT_WIDTH, MAIN_WINDOW_DEFAULT_HEIGHT));
+            ensure_runtime_assets(&app_handle);
+            for managed_window in MANAGED_WINDOWS {
+                initialize_managed_window(app, &config, managed_window)?;
+            }
 
-                if let Some(position) = resolve_main_window_position(
-                    &app_handle,
-                    &config,
-                    window_size.width,
-                    window_size.height,
-                )? {
-                    main_window.set_position(position).map_err(|e| e.to_string())?;
-                }
+            for managed_window in MANAGED_WINDOWS {
+                enforce_named_window_position(&app_handle, managed_window.label(), 4, 400);
             }
 
             info!("Application started in portable mode. (Session ID: {})", session_id);
@@ -710,10 +1213,12 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             save_settings,
+            save_window_position,
             load_settings,
             save_session,
             get_sessions,
             load_session,
+            get_runtime_asset_paths,
             list_effect_monitors,
             sync_effect_window,
             play_bingo_effect,

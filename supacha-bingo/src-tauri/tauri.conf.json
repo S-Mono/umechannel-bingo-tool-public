@@ -11,32 +11,33 @@
   "app": {
     "macOSPrivateApi": true,
     "windows": [
-      { "label": "main", "title": "Bingo Control", "width": 450, "height": 650, "maximizable": false },
+      { "label": "main", "title": "Bingo Control", "width": 450, "height": 650, "maximizable": false, "visible": false },
       {
         "label": "display",
         "title": "Bingo Display",
         "width": 282,
         "height": 368,
+        "visible": false,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "resizable": false,
         "maximizable": false
       },
       {
         "label": "effect",
         "title": "Bingo Effect",
-        "width": 1280,
-        "height": 720,
-        "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
+        "width": 1920,
+        "height": 1080,
+        "decorations": true,
+        "transparent": false,
+        "alwaysOnTop": false,
         "visible": false,
-        "resizable": false,
-        "maximizable": false,
-        "minimizable": false,
-        "skipTaskbar": true,
-        "focus": false
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "skipTaskbar": false,
+        "focus": true
       }
     ],
     "security": {
